@@ -1192,6 +1192,7 @@ struct context_def resource_options_ctx = {
 		{ "quorum", ENUM_NUM(quorum, QUORUM, 1, DRBD_PEERS_MAX) },
 		{ "on-no-quorum", ENUM(on_no_quorum, ON_NO_QUORUM) },
 		{ "quorum-minimum-redundancy", ENUM_NUM(quorum_min_redundancy, QUORUM, 1, DRBD_PEERS_MAX) },
+		{ "quorum-dynamic-voters", BOOLEAN(quorum_dynamic_voters, QUORUM_DYNAMIC_VOTERS) },
 		{ "on-suspended-primary-outdated", ENUM(on_susp_primary_outdated, ON_SUSP_PRI_OUTD) },
 		{ } },
 };
