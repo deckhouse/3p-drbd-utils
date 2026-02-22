@@ -1007,7 +1007,8 @@ const struct en_map quorum_map[] = {
 	{ "read-balancing", ENUM(read_balancing, READ_BALANCING) },			\
 	{ "rs-discard-granularity",							\
 	  NUMERIC(rs_discard_granularity, RS_DISCARD_GRANULARITY),			\
-	  .unit = "bytes" }
+	  .unit = "bytes" },								\
+	{ "non-voting", BOOLEAN(non_voting, NON_VOTING) }
 
 #define CHANGEABLE_NET_OPTIONS								\
 	{ "protocol", ENUM_NOCASE(wire_protocol, PROTOCOL) },				\
