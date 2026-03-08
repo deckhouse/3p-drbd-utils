@@ -3,4 +3,4 @@
 	url = https://github.com/deckhouse/3p-drbd-headers.git
 	update = rebase
 	fetchRecurseSubmodules = true
-	branch = flant-9.2
+	branch = flant
