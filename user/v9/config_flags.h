@@ -105,6 +105,7 @@ extern struct context_def device_options_ctx;
 extern struct context_def invalidate_ctx;
 extern struct context_def invalidate_adm_ctx;
 extern struct context_def invalidate_peer_ctx;
+extern struct context_def track_bitmap_cmd_ctx;
 extern struct context_def create_md_ctx;
 extern struct context_def forceable_ctx;
 extern struct context_def adjust_ctx;
