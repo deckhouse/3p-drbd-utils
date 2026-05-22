@@ -1257,6 +1257,14 @@ struct context_def invalidate_peer_ctx = {
 		{ } },
 };
 
+struct context_def track_bitmap_cmd_ctx = {
+	NLA_POLICY(track_bitmap_parms),
+	.nla_type = DRBD_NLA_TRACK_BITMAP_PARMS,
+	.fields = {
+		{ "start", FLAG(start) },
+		{ } },
+};
+
 struct context_def peer_device_options_ctx = {
 	NLA_POLICY(peer_device_conf),
 	.nla_type = DRBD_NLA_PEER_DEVICE_OPTS,
