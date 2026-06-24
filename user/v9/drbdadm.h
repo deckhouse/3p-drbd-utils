@@ -21,6 +21,8 @@
 #include "shared_main.h"
 #include "path.h"
 
+#include "linux/drbd.h"
+
 /* FIXME keep in sync with GENL_MAGIC_VERSION,
  * without including all the genl magic...
  */
@@ -40,6 +42,7 @@ struct d_option
 	char* name;
 	char* value;
 	unsigned int mentioned  :1 ; // for the adjust command.
+	unsigned int unknown  :1 ; // for the adjust command.
 	unsigned int is_escaped :1 ;
 	unsigned int adj_skip :1;
 	unsigned int inherited :1;
@@ -177,7 +180,6 @@ struct path
 	unsigned int adj_seen:1;
 	unsigned int proxy_conn_is_down:1;
 	unsigned int ignore:1;
-	unsigned int adj_new:1; /* This path gets added by adjust */
 	STAILQ_ENTRY(path) link;
 };
 STAILQ_HEAD(paths, path);
@@ -201,11 +203,11 @@ struct connection
 	unsigned int ignore_tmp:1;
 	unsigned int me:1;
 	unsigned int implicit:1;
-	unsigned int is_standalone:1;
 	/* on_cmdline is set it was explicity asked for on the command line.
 	   Not set if only found by iterating over all connextions in resource */
 	unsigned int on_cmdline:1;
-	unsigned int adj_new:1; /* This connection gets added by adjust */
+	unsigned int adj_seen:1;
+	enum drbd_conn_state cstate; /* from drbdsetup show for adjust */
 	STAILQ_ENTRY(connection) link;
 };
 STAILQ_HEAD(connections, connection);
@@ -241,7 +243,7 @@ struct d_resource
 	struct options proxy_options;
 	struct options proxy_plugins;
 	STAILQ_ENTRY(d_resource) link;
-	char *config_file; /* The config file this resource is define in.*/
+	const char *config_file; /* The config file this resource is define in.*/
 	int start_line;
 	unsigned int stacked_timeouts:1;
 	unsigned int ignore:1;
@@ -259,10 +261,56 @@ STAILQ_HEAD(resources, d_resource);
 
 struct cfg_ctx;
 
+
+/* stages of configuration, as performed on "drbdadm up"
+ * or "drbdadm adjust":
+ */
+enum drbd_cfg_stage {
+	/* prerequisite stage: create objects, start daemons, ... */
+	CFG_PREREQ,
+
+	/* run time changeable settings of resources */
+	CFG_RESOURCE,
+
+	/* detach/attach local disks, */
+	/* detach, del-minor */
+	CFG_DISK_PREP_DOWN,
+	/* new-minor */
+	CFG_DISK_PREP_UP,
+
+	/* disconnect */
+	CFG_NET_DISCONNECT,
+	/* down,  del-peer, proxy down, del-path */
+	CFG_NET_PREP_DOWN,
+	/* add-peer, proxy up */
+	CFG_NET_PREP_UP,
+
+	/* add-path */
+	CFG_NET_PATH,
+
+	/* discard/set connection parameters */
+	CFG_NET,
+
+	/* peer device options */
+	CFG_PEER_DEVICE,
+
+	/* attach, disk-options, resize */
+	CFG_DISK,
+
+	/* actually start with connection attempts */
+	CFG_NET_CONNECT,
+
+	/* Wait for connect to complete */
+	CFG_WAIT_CONNECT,
+
+	__CFG_LAST
+};
+
 struct adm_cmd {
 	const char *name;
 	int (*function) (const struct cfg_ctx *);
 	const struct context_def *drbdsetup_ctx;
+	enum drbd_cfg_stage stage;
 	/* which level this command is for.
 	 * 0: don't show this command, ever
 	 * 1: normal administrative commands, shown in normal help
@@ -314,7 +362,7 @@ struct cfg_ctx {
 };
 
 
-extern char *canonify_path(char *path);
+extern char *canonify_path(const char *path);
 extern int pushd(const char *path);
 extern void popd(int fd);
 
@@ -339,6 +387,7 @@ extern struct adm_cmd del_peer_cmd;
 extern struct adm_cmd new_path_cmd;
 extern struct adm_cmd del_path_cmd;
 extern struct adm_cmd connect_cmd;
+extern struct adm_cmd wait_c_adj_cmd;
 extern struct adm_cmd net_options_cmd;
 extern struct adm_cmd net_options_defaults_cmd;
 extern struct adm_cmd peer_device_options_defaults_cmd;
@@ -349,6 +398,7 @@ extern struct adm_cmd proxy_conn_down_cmd;
 extern struct adm_cmd proxy_conn_up_cmd;
 extern struct adm_cmd proxy_conn_plugins_cmd;
 extern struct adm_cmd proxy_reconf_cmd;
+extern struct adm_cmd sh_list_adjustable;
 
 struct d_name *find_backend_option(const char *opt_name);
 extern int adm_create_md(const struct cfg_ctx *);
@@ -357,55 +407,16 @@ extern int _adm_drbdmeta(const struct cfg_ctx *, int flags, char *argument);
 extern struct d_option *find_opt(struct options *base, const char *name);
 extern bool del_opt(struct options *base, const char * const name);
 
-/* stages of configuration, as performed on "drbdadm up"
- * or "drbdadm adjust":
- */
-enum drbd_cfg_stage {
-	/* prerequisite stage: create objects, start daemons, ... */
-	CFG_PREREQ,
+#define SCHEDULE_ONCE		0x1000
+#define SCHED_ONCE_P_RESOURCE	0x2000
 
-	/* run time changeable settings of resources */
-	CFG_RESOURCE,
+struct deferred_cmd *schedule_deferred_cmd(const struct adm_cmd *, const struct cfg_ctx *,
+					   const struct deferred_cmd *depends_on,
+					   unsigned int flags);
+void cancel_deferred_cmd(struct deferred_cmd *d);
+void cancel_deferred_waits(const struct d_resource *res);
+const struct adm_cmd *deferred_cmd(const struct deferred_cmd *dcmd);
 
-	/* detach/attach local disks, */
-	/* detach, del-minor */
-	CFG_DISK_PREP_DOWN,
-	/* new-minor */
-	CFG_DISK_PREP_UP,
-
-	/* disconnect */
-	CFG_NET_DISCONNECT,
-	/* down,  del-peer, proxy down, del-path */
-	CFG_NET_PREP_DOWN,
-	/* add-peer, proxy up */
-	CFG_NET_PREP_UP,
-
-	/* add-path */
-	CFG_NET_PATH,
-
-	/* discard/set connection parameters */
-	CFG_NET,
-
-	/* peer device options */
-	CFG_PEER_DEVICE,
-
-	/* attach, disk-options, resize */
-	CFG_DISK,
-
-	/* actually start with connection attempts */
-	CFG_NET_CONNECT,
-
-	/* retrying after new connections established */
-	CFG_NET_RETRY,
-
-	__CFG_LAST
-};
-
-#define SCHEDULE_ONCE       0x1000
-#define RETRY_AFTER_CONNECT 0x2000
-
-extern void schedule_deferred_cmd(const struct adm_cmd *, const struct cfg_ctx *,
-				  enum drbd_cfg_stage);
 extern void maybe_exec_legacy_drbdadm(char **argv);
 extern void uc_node(enum usage_count_type type);
 extern int have_ip(const char *af, const char *ip);
@@ -458,8 +469,8 @@ bool peer_diskless(struct peer_device *peer_device);
 
 const struct field_def *find_field(bool *no_prefix, const struct context_def *options_def, const char *name);
 
-extern char *config_file;
-extern char *config_save;
+extern const char *config_file;
+extern const char *config_save;
 extern int config_valid;
 extern struct resources config;
 extern struct d_resource* common;

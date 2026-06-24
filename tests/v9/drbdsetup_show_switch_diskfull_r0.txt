@@ -19,6 +19,7 @@ resource "r0" {
             _this_host ipv4 192.168.122.11:7001;
             _remote_host ipv4 192.168.122.12:7001;
         }
+	_cstate Connected;
         net {
             load-balance-paths	yes;
             _name           	"i2";

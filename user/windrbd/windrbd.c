@@ -119,6 +119,9 @@ void usage_and_exit(void)
 	fprintf(stderr, "	windrbd [opt] resume-io-for-minor <minor>\n");
 	fprintf(stderr, "		Tells WinDRBD driver to resume I/O by submitting.\n");
 	fprintf(stderr, "		I/O requests (including the suspended ones) to the DRBD engine.\n");
+	fprintf(stderr, "	windrbd [opt] bus-device-is-working\n");
+	fprintf(stderr, "		Queries WinDRBD driver if it can access the bus device\n");
+	fprintf(stderr, "		Exit status is 0 (success) if bus device is working.\n");
 
 	fprintf(stderr, "Options are:\n");
 	fprintf(stderr, "	-q (quiet): be a little less verbose.\n");
@@ -991,19 +994,19 @@ static int check_for_retvals(void)
 				else
 					rv.retval = retval;
 
+				if (!quiet) {
+					if (WIFSIGNALED(retval)) {
+						timestamp();
+						printf("handler was terminated by signal %d (id from kernel is %d)\n", WTERMSIG(retval), p->cmd->id);
+					} else {
+						timestamp();
+						printf("handler terminated and returned exit status %d (id from kernel is %d)\n", retval, p->cmd->id);
+					}
+				}
 				free(p->cmd);
 				LIST_REMOVE(p, list_entry);
 				free(p);
 
-				if (!quiet) {
-					if (WIFSIGNALED(retval)) {
-						timestamp();
-						printf("handler was terminated by signal %d\n", WTERMSIG(retval));
-					} else {
-						timestamp();
-						printf("handler terminated and returned exit status %d\n", retval);
-					}
-				}
 				ret = DeviceIoControl(um_root_dev_handle, IOCTL_WINDRBD_ROOT_SEND_USERMODE_HELPER_RETURN_VALUE, &rv, sizeof(rv), NULL, 0, &unused, NULL);
 				if (!ret) {
 					err = GetLastError();
@@ -1070,7 +1073,7 @@ static int exec_command(struct windrbd_usermode_helper *next_cmd)
 
 	if (!quiet) {
 		timestamp();
-		printf("about to exec %s ...\n", cmd);
+		printf("about to exec %s ... (id from kernel is %d)\n", cmd, next_cmd->id);
 		timestamp();
 		for (i=0;argv[i]!=NULL;i++) {
 			printf("%s ", argv[i]);
@@ -1478,6 +1481,26 @@ int print_lock_down_state(void)
 				printf("Config key is not set, WinDRBD is not locked\n");
 		}
 		return value;
+	}
+	return ret;
+}
+
+int print_bus_device_working(void)
+{
+	int value, ret;
+
+	ret = get_int_ioctl(IOCTL_WINDRBD_ROOT_BUS_DEVICE_IS_WORKING, &value);
+	if (ret == 0) {
+		if (!quiet) {
+			if (value)
+				printf("WinDRBD Virtual Bus Device works as expected.\n");
+			else
+				printf("WinDRBD Virtual Bus Device does NOT work as expected, please recreate\nwindrbd remove-bus-device <inf-file>\nwindrbd install-bus-device <inf-file>\n");
+		}
+		/* return 0 (= success in bash) only if ioctl succeeded
+		 * and ioctl reported bus device working.
+		 */
+		return value ? 0 : 1;
 	}
 	return ret;
 }
@@ -2064,6 +2087,12 @@ int main(int argc, char ** argv)
 			usage_and_exit();
 		}
 		return update_size2(argv[optind+1], atoll_or_die(argv[optind+2]));
+	}
+	if (strcmp(op, "bus-device-is-working") == 0) {
+		if (argc != optind+1) {
+			usage_and_exit();
+		}
+		return print_bus_device_working();
 	}
 
 	usage_and_exit();

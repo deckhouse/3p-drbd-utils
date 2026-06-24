@@ -528,16 +528,14 @@ bool ipv6_addresses_match(const char *const addr_1st,
 	return match;
 }
 
-unsigned long long
-m_strtoll(const char *s, const char def_unit)
+void print_strtoll_error_and_exit(int err, const char *s, const char def_unit)
 {
-	unsigned long long r;
-
-	switch(new_strtoll(s, def_unit, &r)) {
+	switch(err) {
 	case MSE_OK:
-		return r;
+		fprintf(stderr, "unexpected MSE_OK\n");
+		exit(100);
 	case MSE_DEFAULT_UNIT:
-		fprintf(stderr, "unexpected default unit: %d\n",def_unit);
+		fprintf(stderr, "unexpected default unit: %d\n", def_unit);
 		exit(100);
 	case MSE_MISSING_NUMBER:
 		fprintf(stderr, "missing number argument\n");
@@ -555,6 +553,19 @@ m_strtoll(const char *s, const char def_unit)
 		fprintf(stderr, "m_strtoll() is confused\n");
 		exit(20);
 	}
+}
+
+unsigned long long
+m_strtoll(const char *s, const char def_unit)
+{
+	enum new_strtoll_errs err;
+	unsigned long long r;
+
+	err = new_strtoll(s, def_unit, &r);
+	if (err != MSE_OK) {
+		print_strtoll_error_and_exit(err, s, def_unit);
+	}
+	return r;
 }
 
 
@@ -982,10 +993,11 @@ int log_err(const char *format, ...)
  * so any legal input do drbdadm "drbdadm dump" should result in output, which,
  * if fed into an additional "drbdadm dump" should give the same output again.
  */
-const char *esc(char *str)
+const char *esc(const char *str)
 {
 	static char buffer[1024];
-	char *ue = str, *e = buffer;
+	const char *ue = str;
+	char *e = buffer;
 
 	if (!str || !str[0]) {
 		return "\"\"";
@@ -1015,10 +1027,11 @@ const char *esc(char *str)
 
 /* escape a few things that are not legal in xml content; good enough for our
  * purposes, but likely not "academically correct" resp.  "complete". */
-const char *esc_xml(char *str)
+const char *esc_xml(const char *str)
 {
 	static char buffer[1024];
-	char *ue = str, *e = buffer;
+	const char *ue = str;
+	char *e = buffer;
 
 	if (!str || !str[0]) {
 		return "";

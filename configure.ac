@@ -4,16 +4,13 @@ dnl
 dnl License: GNU General Public License Version 2 (GPLv2)
 
 dnl Minimum autoconf version we require
-AC_PREREQ([2.63])
+AC_PREREQ([2.69])
 
 dnl Include cpp feature testing macro
-dnl AC_CONFIG_MACRO_DIR([m4])
-dnl Using AC_CONFIG_MACRO_DIR([m4]) would be the correct way, but RHEL6 ships a broken autoconf
-m4_include([m4/AX_CXX_COMPILE_STDXX.m4])
-m4_include([m4/AX_CXX_COMPILE_STDXX_11.m4])
+AC_CONFIG_MACRO_DIR([m4])
 
 dnl What we are, our version, who to bug in case of problems
-AC_INIT(DRBD, 9.31.0, [drbd-dev@lists.linbit.com])
+AC_INIT(DRBD, 9.32.0, [drbd-dev@lists.linbit.com])
 
 dnl Sanitize $prefix. Autoconf does this by itself, but so late in the
 dnl generated configure script that the expansion does not occur until
@@ -49,7 +46,7 @@ dnl "--with-<foo>" options (all except rgm enabled by default, pass --without-<f
 WITH_84_SUPPORT=yes
 WITH_UDEV=yes
 WITH_PACEMAKER=yes
-WITH_HEARTBEAT=yes
+WITH_HEARTBEAT=no
 WITH_RGMANAGER=no
 WITH_BASHCOMPLETION=yes
 WITH_NOARCH_SUBPACKAGES=no
@@ -77,11 +74,11 @@ AC_ARG_WITH([pacemaker],
 	[WITH_PACEMAKER=$withval])
 AC_ARG_WITH([heartbeat],
 	[AS_HELP_STRING([--with-heartbeat],
-			[Enable Heartbeat v1 haresources integration scripts])],
+			[Enable Heartbeat v1 haresources integration scripts (deprecated!)])],
 	[WITH_HEARTBEAT=$withval])
 AC_ARG_WITH([rgmanager],
 	[AS_HELP_STRING([--with-rgmanager],
-			[Enable Red Hat Cluster Suite integration])],
+			[Enable Red Hat Cluster Suite integration (deprecated!)])],
 	[WITH_RGMANAGER=$withval])
 AC_ARG_WITH([bashcompletion],
 	[AS_HELP_STRING([--with-bashcompletion],
@@ -89,7 +86,7 @@ AC_ARG_WITH([bashcompletion],
 	[WITH_BASHCOMPLETION=$withval])
 AC_ARG_WITH([distro],
 	[AS_HELP_STRING([--with-distro],
-			[Configure for a specific distribution (supported values: generic, redhat, suse, debian; default is to autodetect)])],
+			[Configure for a specific distribution (deprecated!)])],
 	[DISTRO=$withval])
 AC_ARG_WITH([initdir],
 	[AS_HELP_STRING([--with-initdir],
@@ -133,8 +130,6 @@ fi
 AC_SUBST(WITH_84_SUPPORT)
 AC_SUBST(WITH_UDEV)
 AC_SUBST(WITH_PACEMAKER)
-AC_SUBST(WITH_HEARTBEAT)
-AC_SUBST(WITH_RGMANAGER)
 AC_SUBST(WITH_BASHCOMPLETION)
 AC_SUBST(WITH_MANUAL)
 AC_SUBST(WITH_PREBUILTMAN)
@@ -381,108 +376,22 @@ AC_CHECK_HEADERS([linux/genetlink.h],
    [AC_MSG_ERROR([Could not find linux/genetlink.h])])
 fi
 
-dnl Checks for system services
-
-BASH_COMPLETION_SUFFIX=""
-UDEV_RULE_SUFFIX=""
-RPM_DIST_TAG=""
-RPM_BUILDREQ_DEFAULT="gcc flex glibc-devel make"
-RPM_REQ_DRBDMON=""
-RPM_SUBPACKAGE_NOARCH=""
-RPM_REQ_PACEMAKER=""
-RPM_REQ_HEARTBEAT=""
-RPM_REQ_BASH_COMPLETION=""
-RPM_REQ_CHKCONFIG_POST=""
-RPM_REQ_CHKCONFIG_PREUN=""
-dnl figure out the distribution we're running on, and set some variables accordingly
-
-if test x"$WITH_WINDRBD" = x"yes" ; then
-   AC_MSG_RESULT([building for WinDRBD, not checking any Linux distros on this host])
-else
-   if test -z $DISTRO; then
-      AC_CHECK_FILE(/etc/redhat-release, [DISTRO="redhat"])
-      AC_CHECK_FILE(/etc/debian_version, [DISTRO="debian"])
-      AC_CHECK_FILE(/etc/SuSE-release, [DISTRO="suse"])
-   fi
-   case "$DISTRO" in
-        redhat)
-	    test -z $INITDIR && INITDIR="$sysconfdir/rc.d/init.d"
-	    RPM_DIST_TAG="%{?dist}"
-	    dnl Fedora/Red Hat packaging guidelines mandate that packages
-	    dnl belonging to the "minimal build system" should not be
-	    dnl listed in BuildRequires
-	    RPM_BUILDREQ_DEFAULT="flex"
-	    RPM_REQ_CHKCONFIG_POST="Requires(post): chkconfig"
-	    RPM_REQ_CHKCONFIG_PREUN="Requires(preun): chkconfig"
-	    AC_MSG_NOTICE([configured for Red Hat (includes Fedora, RHEL, CentOS).])
-
-	    AC_CHECK_FILE(/etc/fedora-release, [SUB_DISTRO="fedora"], [SUB_DISTRO="RHEL"])
-	    if test "$SUB_DISTRO" = "fedora"; then
-		    # pacemaker, heartbeat and bash-completion are not available in RHEL
-		    RPM_REQ_PACEMAKER="Requires: pacemaker"
-		    RPM_REQ_HEARTBEAT="Requires: heartbeat"
-		    RPM_REQ_BASH_COMPLETION="Requires: bash-completion"
-	    fi
-	    ;;
-        debian)
-	    AC_MSG_NOTICE([configured for Debian (includes Ubuntu).])
-            ;;
-        suse)
-	    BASH_COMPLETION_SUFFIX=".sh"
-	    # RPM_REQ_CHKCONFIG_POST="" chkconfig is part of aaa_base on suse
-	    # RPM_REQ_CHKCONFIG_PREUN="" chkconfig is part of aaa_base on suse
-	    AC_MSG_NOTICE([configured for SUSE (includes openSUSE, SLES).])
-
-	    RPM_REQ_BASH_COMPLETION="Requires: bash"
-	    # The following are disabled for hassle free updates:
-	    # RPM_REQ_PACEMAKER="Requires: pacemaker"
-	    # RPM_REQ_HEARTBEAT="Requires: heartbeat"
-
-	    # Unfortunately gcc on SLES9 is broken with -O2. Works with -O1
-	    if grep -q 'VERSION = 9' /etc/SuSE-release; then
-		    CFLAGS="-g -O1"
-	    fi
-	    ;;
-         "")
-	    AC_MSG_WARN([Unable to determine what distribution we are running on. Distribution-specific features will be disabled.])
-	    ;;
-    esac
-    dnl INITDIR may be set with --with-initdir, or set in the distro
-    dnl detection magic above. If unset down to here, use a sensible
-    dnl default.
-    test -z $INITDIR && INITDIR="$sysconfdir/init.d"
-
-    dnl Our udev rules file is known to work only with udev >= 85
-    if test "x$enable_udevchecks" != "xno" && test "$WITH_UDEV" = "yes"; then
-       udev_version=$( set -- $($UDEVADM version); echo $1 )
-       if test -z "$udev_version"; then
-	    udev_version=$( set -- $($UDEVINFO -V); echo $3 )
-       fi
-       if test -z "$udev_version" || test "$udev_version" -lt 85; then
-          UDEV_RULE_SUFFIX=".disabled"
-          AC_MSG_WARN([Obsolete or unknown udev version. Installing disabled udev rules.])
-       fi
-    fi
-
-    dnl Our sub-packages can be built for noarch, but RPM only supports
-    dnl this from version 4.6.0 forward
-    if test "$WITH_NOARCH_SUBPACKAGES" = "yes"; then
-        RPM_SUBPACKAGE_NOARCH="BuildArch: noarch"
-    fi
+dnl deprecated options
+if test -n "$DISTRO"; then
+   AC_MSG_WARN([--with-distro is deprecated and ignored and will be removed in the future.])
 fi
 
-AC_SUBST(DISTRO)
+if test "$WITH_RGMANAGER" = "yes"; then
+   AC_MSG_WARN([--with-rgmanager is deprecated and ignored and will be removed in the future.])
+fi
+
+if test "$WITH_HEARTBEAT" = "yes"; then
+   AC_MSG_WARN([--with-heartbeat is deprecated and ignored and will be removed in the future.])
+fi
+
+test -z $INITDIR && INITDIR="$sysconfdir/init.d"
+
 AC_SUBST(INITDIR)
-AC_SUBST(BASH_COMPLETION_SUFFIX)
-AC_SUBST(UDEV_RULE_SUFFIX)
-AC_SUBST(RPM_DIST_TAG)
-AC_SUBST(RPM_BUILDREQ_DEFAULT)
-AC_SUBST(RPM_SUBPACKAGE_NOARCH)
-AC_SUBST(RPM_REQ_PACEMAKER)
-AC_SUBST(RPM_REQ_HEARTBEAT)
-AC_SUBST(RPM_REQ_BASH_COMPLETION)
-AC_SUBST(RPM_REQ_CHKCONFIG_POST)
-AC_SUBST(RPM_REQ_CHKCONFIG_PREUN)
 AC_SUBST(WITH_CLITEST)
 
 AH_TEMPLATE(DRBD_LIB_DIR, [Local state directory. Commonly

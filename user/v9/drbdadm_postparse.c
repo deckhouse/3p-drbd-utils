@@ -1223,7 +1223,7 @@ static void expand_opts(struct d_resource *res, struct context_def *oc, struct o
 			if (!is_equal(oc, existing_option, option)) {
 				log_err("%s:%d: in resource %s, "
 				    "ambiguous inheritance for option \"%s\".\n"
-				    "should be \"%s\" and \"%s\" at the same time\n.",
+				    "should be \"%s\" and \"%s\" at the same time.\n",
 				    res->config_file, res->start_line, res->name,
 				    option->name, existing_option->value, option->value);
 				config_valid = 0;
@@ -1231,7 +1231,7 @@ static void expand_opts(struct d_resource *res, struct context_def *oc, struct o
 			/* else {
 				log_err("%s:%d: WARNING: in resource %s, "
 				    "multiple inheritance for option \"%s\".\n"
-				    "with same value\n.",
+				    "with same value.\n",
 				    res->config_file, res->start_line, res->name,
 				    option->name, existing_option->value, option->value);
                         }
@@ -1424,7 +1424,7 @@ static void sanity_check_cmd(char *cmd_name)
  * dopd cannot work.
  * NOTE: we assume that any gid != 0 will be the group dopd will run as,
  * typically haclient. */
-static void sanity_check_conf(char *c)
+static void sanity_check_conf(const char *c)
 {
 	struct stat sb;
 

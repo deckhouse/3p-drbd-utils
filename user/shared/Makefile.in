@@ -18,7 +18,6 @@
 #
 
 # variables set by configure
-DISTRO = @DISTRO@
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 localstatedir = @localstatedir@
@@ -26,8 +25,6 @@ datarootdir = @datarootdir@
 datadir = @datadir@
 sbindir = @sbindir@
 sysconfdir = @sysconfdir@
-BASH_COMPLETION_SUFFIX = @BASH_COMPLETION_SUFFIX@
-UDEV_RULE_SUFFIX = @UDEV_RULE_SUFFIX@
 INITDIR = @INITDIR@
 LIBDIR = @prefix@/lib/@PACKAGE_TARNAME@
 CC = @CC@
@@ -45,7 +42,6 @@ WITH_84_SUPPORT = @WITH_84_SUPPORT@
 WITH_WINDRBD = @WITH_WINDRBD@
 WITH_UDEV = @WITH_UDEV@
 WITH_PACEMAKER = @WITH_PACEMAKER@
-WITH_RGMANAGER = @WITH_RGMANAGER@
 WITH_BASHCOMPLETION = @WITH_BASHCOMPLETION@
 
 # for some reason some of the commands below only work correctly in bash,

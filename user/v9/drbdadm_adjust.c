@@ -46,6 +46,17 @@
 #include "drbdadm_parser.h"
 #include "config_flags.h"
 
+static int adm_output_res_name(const struct cfg_ctx *ctx);
+
+/*  */ struct adm_cmd output_res_name_cmd = { "", adm_output_res_name };
+
+static int adm_output_res_name(const struct cfg_ctx *ctx)
+{
+	printf("%s\n", ctx->res->name);
+
+	return 0;
+}
+
 /* drbdsetup show might complain that the device minor does
    not exist at all. Redirect stderr to /dev/null therefore.
  */
@@ -89,6 +100,20 @@ static FILE *m_popen(int *pid, const char * const* argv)
 	close(dev_null);
 	*pid=mpid;
 	return fdopen(pipes[0],"r");
+}
+
+static struct deferred_cmd *
+adj_schedule_deferred_cmd(const struct adm_cmd *cmd,
+			  const struct cfg_ctx *ctx,
+			  const struct deferred_cmd *depends_on,
+			  unsigned int flags)
+{
+	if (ctx->cmd == &sh_list_adjustable) {
+		cmd = &output_res_name_cmd;
+		flags = SCHED_ONCE_P_RESOURCE;
+	}
+
+	return schedule_deferred_cmd(cmd, ctx, depends_on, flags);
 }
 
 __attribute__((format(printf, 2, 3)))
@@ -138,6 +163,11 @@ static int opts_equal(struct context_def *ctx, struct options *conf, struct opti
 	struct d_option *opt, *run_opt;
 
 	STAILQ_FOREACH(run_opt, run_base, link) {
+		if (run_opt->unknown) {
+			/* In case it was mentioned in config, pretend it was not. */
+			del_opt(conf, run_opt->name);
+			continue;
+		}
 		if (run_opt->adj_skip)
 			continue;
 
@@ -209,13 +239,14 @@ static struct path *find_path_by_addrs(struct connection *conn, struct path *pat
 	return NULL;
 }
 
-static bool adjust_paths(const struct cfg_ctx *ctx, struct connection *running_conn)
+static bool adjust_paths(const struct cfg_ctx *ctx, struct connection *running_conn,
+	const struct deferred_cmd *depends_on)
 {
 	struct connection *configured_conn = ctx->conn;
 	struct path *configured_path, *running_path;
 	struct cfg_ctx tmp_ctx = *ctx;
 	int nr_running = 0;
-	bool del_path = false;
+	bool del_path = false, rv = false;
 
 	for_each_path(configured_path, &configured_conn->paths) {
 		if (configured_path->ignore)
@@ -223,8 +254,7 @@ static bool adjust_paths(const struct cfg_ctx *ctx, struct connection *running_c
 		running_path = find_path_by_addrs(running_conn, configured_path);
 		if (!running_path) {
 			tmp_ctx.path = configured_path;
-			configured_path->adj_new = true;
-			schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, CFG_NET_PATH);
+			adj_schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, depends_on, 0);
 		} else {
 			running_path->adj_seen = 1;
 		}
@@ -232,22 +262,26 @@ static bool adjust_paths(const struct cfg_ctx *ctx, struct connection *running_c
 
 	for_each_path(running_path, &running_conn->paths) {
 		nr_running++;
-		if (!running_path->adj_seen) {
-			tmp_ctx.path = running_path;
-			schedule_deferred_cmd(&del_path_cmd, &tmp_ctx,
-					      CFG_NET_PREP_DOWN | RETRY_AFTER_CONNECT);
+		if (!running_path->adj_seen)
 			del_path = true;
-		}
 	}
 
 	if (nr_running == 1 && del_path) {
 		/* Deleting the last path fails is the connection is C_CONNECTING */
-		if (!running_conn->is_standalone)
-			schedule_deferred_cmd(&disconnect_cmd, &tmp_ctx, CFG_NET_DISCONNECT);
-		return true;
+		if (running_conn->cstate != C_STANDALONE)
+			depends_on = adj_schedule_deferred_cmd(&disconnect_cmd, &tmp_ctx, depends_on, 0);
+		rv = true;
 	}
 
-	return false;
+
+	for_each_path(running_path, &running_conn->paths) {
+		if (!running_path->adj_seen) {
+			tmp_ctx.path = running_path;
+			adj_schedule_deferred_cmd(&del_path_cmd, &tmp_ctx, depends_on, 0);
+		}
+	}
+
+	return rv;
 }
 
 static struct connection *matching_conn(struct connection *pattern, struct connections *pool, bool ret_me)
@@ -319,7 +353,8 @@ static int do_proxy_reconf(const struct cfg_ctx *ctx)
 	return rv;
 }
 
-static void schedule_deferred_proxy_reconf(const struct cfg_ctx *ctx, char *text)
+static void schedule_deferred_proxy_reconf(const struct cfg_ctx *ctx, char *text,
+					   const struct deferred_cmd *depends_on)
 {
 	struct adm_cmd *cmd;
 
@@ -331,7 +366,7 @@ static void schedule_deferred_proxy_reconf(const struct cfg_ctx *ctx, char *text
 
 	cmd->name = text;
 	cmd->function = &do_proxy_reconf;
-	schedule_deferred_cmd(cmd, ctx, CFG_NET);
+	adj_schedule_deferred_cmd(cmd, ctx, depends_on, 0);
 }
 
 #define MAX_PLUGINS (10)
@@ -377,6 +412,7 @@ bool _is_plugin_in_list(char *string,
 
 static int proxy_reconf(const struct cfg_ctx *ctx, struct connection *running_conn)
 {
+	struct deferred_cmd *dcmd = NULL;
 	int reconn = 0;
 	struct connection *conn = ctx->conn;
 	struct path *path = STAILQ_FIRST(&conn->paths); /* multiple paths via proxy, later! */
@@ -416,10 +452,10 @@ static int proxy_reconf(const struct cfg_ctx *ctx, struct connection *running_co
 		/* As the memory is in use while the connection is allocated we have to
 		 * completely destroy and rebuild the connection. */
 
-		schedule_deferred_cmd(&proxy_conn_down_cmd, ctx, CFG_NET_PREP_DOWN);
+		dcmd = adj_schedule_deferred_cmd(&proxy_conn_down_cmd, ctx, dcmd, 0);
 	up_whole_conn:
-		schedule_deferred_cmd(&proxy_conn_up_cmd, ctx, CFG_NET_PREP_UP);
-		schedule_deferred_cmd(&proxy_conn_plugins_cmd, ctx, CFG_NET_PREP_UP);
+		dcmd = adj_schedule_deferred_cmd(&proxy_conn_up_cmd, ctx, dcmd, 0);
+		dcmd = adj_schedule_deferred_cmd(&proxy_conn_plugins_cmd, ctx, dcmd, 0);
 
 		/* With connection cleanup and reopen everything is rebuild anyway, and
 		 * DRBD will get a reconnect too.  */
@@ -498,7 +534,7 @@ static int proxy_reconf(const struct cfg_ctx *ctx, struct connection *running_co
 
 	/* change only a few plugin settings. */
 	for(i=0; i<used; i++)
-		schedule_deferred_proxy_reconf(ctx, plugin_changes[i]);
+		schedule_deferred_proxy_reconf(ctx, plugin_changes[i], dcmd);
 
 	return reconn;
 }
@@ -663,8 +699,8 @@ static struct peer_device *matching_peer_device(struct peer_device *pattern, str
 	return NULL;
 }
 
-static void
-adjust_peer_devices(const struct cfg_ctx *ctx, struct connection *running_conn)
+static void adjust_peer_devices(const struct cfg_ctx *ctx, struct connection *running_conn,
+	const struct deferred_cmd *depends_on)
 {
 	struct adm_cmd *cmd = &peer_device_options_defaults_cmd;
 	struct context_def *oc = &peer_device_options_ctx;
@@ -675,15 +711,16 @@ adjust_peer_devices(const struct cfg_ctx *ctx, struct connection *running_conn)
 		running_pd = matching_peer_device(peer_device, &running_conn->peer_devices);
 		tmp_ctx.vol = volume_by_vnr(&ctx->conn->peer->volumes, peer_device->vnr);
 		if (!running_pd) {
-			schedule_deferred_cmd(cmd, &tmp_ctx, CFG_PEER_DEVICE | SCHEDULE_ONCE);
+			adj_schedule_deferred_cmd(cmd, &tmp_ctx, depends_on, SCHEDULE_ONCE);
 			continue;
 		}
 		if (!opts_equal(oc, &peer_device->pd_options, &running_pd->pd_options))
-			schedule_deferred_cmd(cmd, &tmp_ctx, CFG_PEER_DEVICE);
+			adj_schedule_deferred_cmd(cmd, &tmp_ctx, depends_on, 0);
 	}
 }
 
-void schedule_peer_device_options(const struct cfg_ctx *ctx)
+static void
+schedule_peer_device_options(const struct cfg_ctx *ctx, struct deferred_cmd *depends_on)
 {
 	struct adm_cmd *cmd = &peer_device_options_defaults_cmd;
 	struct cfg_ctx tmp_ctx = *ctx;
@@ -701,7 +738,7 @@ void schedule_peer_device_options(const struct cfg_ctx *ctx)
 				continue;
 
 			tmp_ctx.vol = vol;
-			schedule_deferred_cmd(cmd, &tmp_ctx, CFG_PEER_DEVICE | SCHEDULE_ONCE);
+			depends_on = adj_schedule_deferred_cmd(cmd, &tmp_ctx, depends_on, SCHEDULE_ONCE);
 		}
 	} else if (!tmp_ctx.conn) {
 		struct connection *conn;
@@ -711,7 +748,7 @@ void schedule_peer_device_options(const struct cfg_ctx *ctx)
 				continue;
 
 			tmp_ctx.conn = conn;
-			schedule_deferred_cmd(cmd, &tmp_ctx, CFG_PEER_DEVICE | SCHEDULE_ONCE);
+			depends_on = adj_schedule_deferred_cmd(cmd, &tmp_ctx, depends_on, SCHEDULE_ONCE);
 		}
 	} else {
 		log_err("vol and conn set in schedule_peer_devices_options()!");
@@ -731,47 +768,39 @@ static struct d_volume *matching_volume(struct d_volume *conf_vol, struct volume
 }
 
 
-static void
-adjust_net(const struct cfg_ctx *ctx, struct d_resource* running)
+
+static struct deferred_cmd *adjust_conn(const struct cfg_ctx *ctx, struct d_resource *running,
+					struct deferred_cmd *dcmd, enum drbd_conn_state max_cstate,
+					bool *disconnect)
 {
 	struct connection *conn;
-
-	if (running) {
-		for_each_connection(conn, &running->connections) {
-			struct connection *configured_conn;
-
-			configured_conn = matching_conn(conn, &ctx->res->connections, true);
-			if (!configured_conn) {
-				struct cfg_ctx tmp_ctx = { .res = running, .conn = conn };
-				schedule_deferred_cmd(&del_peer_cmd, &tmp_ctx,
-						      CFG_NET_PREP_DOWN | RETRY_AFTER_CONNECT);
-			}
-		}
-	}
 
 	for_each_connection(conn, &ctx->res->connections) {
 		struct connection *running_conn = NULL;
 		struct path *path;
-		const struct cfg_ctx tmp_ctx = { .res = ctx->res, .conn = conn };
+		const struct cfg_ctx tmp_ctx = { .cmd = ctx->cmd, .res = ctx->res, .conn = conn };
+		bool connect = false;
 
-		if (conn->ignore)
+		if (conn->ignore || conn->adj_seen)
 			continue;
 
 		if (running)
 			running_conn = matching_conn(conn, &running->connections, false);
 		if (!running_conn) {
-			conn->adj_new = true; /* making it as new for the retry case */
-			schedule_deferred_cmd(&new_peer_cmd, &tmp_ctx, CFG_NET_PREP_UP);
-			schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, CFG_NET_PATH);
-			schedule_deferred_cmd(&connect_cmd, &tmp_ctx, CFG_NET_CONNECT);
-			schedule_peer_device_options(&tmp_ctx);
+			dcmd = adj_schedule_deferred_cmd(&new_peer_cmd, &tmp_ctx, dcmd, 0);
+			adj_schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, dcmd, 0);
+			schedule_peer_device_options(&tmp_ctx, dcmd);
+			connect = true;
 		} else {
 			struct context_def *oc = &show_net_options_ctx;
 			struct options *conf_o = &conn->net_options;
 			struct options *runn_o = &running_conn->net_options;
-			bool connect = false, new_path = false;
+			bool new_path = false;
 
-			if (running_conn->is_standalone)
+			if (running_conn->cstate > max_cstate)
+				continue;
+
+			if (running_conn->cstate == C_STANDALONE)
 				connect = true;
 
 			if (!opts_equal(oc, conf_o, runn_o)) {
@@ -781,37 +810,86 @@ adjust_net(const struct cfg_ctx *ctx, struct d_resource* running)
 				if (!opt_equal(oc, "load-balance-paths", conf_o, runn_o)
 				||  !opt_equal(oc, "transport", conf_o, runn_o)) {
 					/* disconnect implicit by del-peer */
-					schedule_deferred_cmd(&del_peer_cmd, &tmp_ctx, CFG_NET_PREP_DOWN);
-					schedule_deferred_cmd(&new_peer_cmd, &tmp_ctx, CFG_NET_PREP_UP);
+					dcmd = adj_schedule_deferred_cmd(&del_peer_cmd, &tmp_ctx, dcmd, 0);
+					dcmd = adj_schedule_deferred_cmd(&new_peer_cmd, &tmp_ctx, dcmd, 0);
 					new_path = true;
 					connect = true;
-					schedule_peer_device_options(&tmp_ctx);
+					*disconnect = true;
+					schedule_peer_device_options(&tmp_ctx, dcmd);
 				} else {
 					del_opt(&tmp_ctx.conn->net_options, "transport");
 					del_opt(&tmp_ctx.conn->net_options, "load-balance-paths");
-					schedule_deferred_cmd(&net_options_defaults_cmd, &tmp_ctx, CFG_NET);
+					adj_schedule_deferred_cmd(&net_options_defaults_cmd, &tmp_ctx, dcmd, 0);
 				}
 			}
 
-			if (new_path)
-				schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, CFG_NET_PATH);
-			else
-				connect |= adjust_paths(&tmp_ctx, running_conn);
+			adjust_peer_devices(&tmp_ctx, running_conn, dcmd);
 
-			if (connect)
-				schedule_deferred_cmd(&connect_cmd, &tmp_ctx, CFG_NET_CONNECT);
+			if (new_path) {
+				dcmd = adj_schedule_deferred_cmd(&new_path_cmd, &tmp_ctx, dcmd, 0);
+			} else {
+				bool dc = adjust_paths(&tmp_ctx, running_conn, dcmd);
+				*disconnect |= dc;
+				connect |= dc;
+			}
+		}
+		conn->adj_seen = true;
 
-			adjust_peer_devices(&tmp_ctx, running_conn);
+		if (connect) {
+			dcmd = adj_schedule_deferred_cmd(&connect_cmd, &tmp_ctx, dcmd, 0);
+			dcmd = adj_schedule_deferred_cmd(&wait_c_adj_cmd, &tmp_ctx, dcmd, 0);
+		} else {
+			dcmd = NULL;
 		}
 
 		path = STAILQ_FIRST(&conn->paths); /* multiple paths via proxy, later! */
 		if (path->my_proxy && hostname_in_list(hostname, &path->my_proxy->on_hosts))
 			proxy_reconf(&tmp_ctx, running_conn);
 	}
+
+	return dcmd;
 }
 
 
-static void adjust_disk(const struct cfg_ctx *ctx, struct d_resource* running)
+static void
+adjust_net(const struct cfg_ctx *ctx, struct d_resource* running, struct deferred_cmd *dcmd)
+{
+	bool one_was_connected = false, disconnect = false;
+	struct connection *conn;
+
+	if (running) {
+		for_each_connection(conn, &running->connections) {
+			if (conn->cstate == C_CONNECTED)
+				one_was_connected = true;
+		}
+	}
+
+	dcmd = adjust_conn(ctx, running, dcmd, C_CONNECTING, &disconnect);
+	dcmd = adjust_conn(ctx, running, dcmd, C_CONNECTED, &disconnect);
+
+	if (running) {
+		for_each_connection(conn, &running->connections) {
+			struct connection *configured_conn;
+
+			configured_conn = matching_conn(conn, &ctx->res->connections, true);
+			if (!configured_conn) {
+				struct cfg_ctx tmp_ctx = { .cmd = ctx->cmd, .res = running, .conn = conn };
+
+				dcmd = adj_schedule_deferred_cmd(&del_peer_cmd, &tmp_ctx, dcmd, 0);
+				disconnect = true;
+			}
+		}
+	}
+
+	if (!(disconnect && one_was_connected))
+		cancel_deferred_waits(ctx->res);
+	if (deferred_cmd(dcmd) == &wait_c_adj_cmd)	/* Remove a final wait-connect */
+		cancel_deferred_cmd(dcmd);
+}
+
+
+static void adjust_disk(const struct cfg_ctx *ctx, struct d_resource *running,
+			const struct deferred_cmd *depends_on)
 {
 	struct d_volume *vol;
 
@@ -819,7 +897,7 @@ static void adjust_disk(const struct cfg_ctx *ctx, struct d_resource* running)
 	 * do we need to detach first,
 	 * or is this just some attribute change? */
 	for_each_volume(vol, &ctx->res->me->volumes) {
-		struct cfg_ctx tmp_ctx = { .res = ctx->res, .vol = vol };
+		struct cfg_ctx tmp_ctx = { .cmd = ctx->cmd, .res = ctx->res, .vol = vol };
 
 		if (ctx->vol && vol != ctx->vol) /* In case we know the volume ignore all others. */
 			continue;
@@ -830,16 +908,16 @@ static void adjust_disk(const struct cfg_ctx *ctx, struct d_resource* running)
 			if (kern_vol != NULL)
 				k_ctx.vol = kern_vol;
 			if (vol->adj_detach)
-				schedule_deferred_cmd(&detach_cmd, &k_ctx, CFG_DISK_PREP_DOWN);
+				depends_on = adj_schedule_deferred_cmd(&detach_cmd, &k_ctx, depends_on, 0);
 			if (vol->adj_del_minor)
-				schedule_deferred_cmd(&del_minor_cmd, &k_ctx, CFG_DISK_PREP_DOWN);
+				depends_on = adj_schedule_deferred_cmd(&del_minor_cmd, &k_ctx, depends_on, 0);
 		}
 		if (vol->adj_attach)
-			schedule_deferred_cmd(&attach_cmd, &tmp_ctx, CFG_DISK);
+			adj_schedule_deferred_cmd(&attach_cmd, &tmp_ctx, depends_on, 0);
 		if (vol->adj_disk_opts)
-			schedule_deferred_cmd(&disk_options_defaults_cmd, &tmp_ctx, CFG_DISK);
+			adj_schedule_deferred_cmd(&disk_options_defaults_cmd, &tmp_ctx, depends_on, 0);
 		if (vol->adj_resize)
-			schedule_deferred_cmd(&resize_cmd, &tmp_ctx, CFG_DISK);
+			adj_schedule_deferred_cmd(&resize_cmd, &tmp_ctx, depends_on, 0);
 	}
 }
 
@@ -934,13 +1012,12 @@ struct d_resource *running_res_by_name(const char *name)
  */
 int _adm_adjust(const struct cfg_ctx *ctx, int adjust_flags)
 {
+	struct deferred_cmd *dcmd = NULL;
 	char config_file_dummy[250];
 	struct d_resource* running;
 	struct volumes empty = STAILQ_HEAD_INITIALIZER(empty);
 	struct d_volume *vol;
-
-	/* necessary per resource actions */
-	int do_res_options = 0;
+	bool do_res_options = 0;	/* necessary per resource actions */
 
 	/* necessary per volume actions are flagged
 	 * in the vol->adj_* members. */
@@ -965,7 +1042,7 @@ int _adm_adjust(const struct cfg_ctx *ctx, int adjust_flags)
 			struct connection *configured_conn = NULL;
 			struct path *configured_path;
 			struct path *path = STAILQ_FIRST(&conn->paths); /* multiple paths via proxy, later! */
-			struct cfg_ctx tmp_ctx = { .res = ctx->res };
+			struct cfg_ctx tmp_ctx = { .cmd = ctx->cmd, .res = ctx->res };
 			char *show_conn;
 			int pid, argc, status, w;
 			const char *argv[20];
@@ -1014,29 +1091,30 @@ int _adm_adjust(const struct cfg_ctx *ctx, int adjust_flags)
 	if (running) {
 		do_res_options = !opts_equal(&resource_options_ctx, &ctx->res->res_options, &running->res_options);
 	} else {
-		schedule_deferred_cmd(&new_resource_cmd, ctx, CFG_PREREQ);
+		dcmd = adj_schedule_deferred_cmd(&new_resource_cmd, ctx, NULL, 0);
 	}
 
 	if (do_res_options)
-		schedule_deferred_cmd(&res_options_defaults_cmd, ctx, CFG_RESOURCE);
-
-	if (adjust_flags & ADJUST_NET)
-		adjust_net(ctx, running);
-
-	if (adjust_flags & ADJUST_DISK)
-		adjust_disk(ctx, running);
+		dcmd = adj_schedule_deferred_cmd(&res_options_defaults_cmd, ctx, NULL, 0);
 
 	for_each_volume(vol, &ctx->res->me->volumes) {
 		if (ctx->vol && vol != ctx->vol) /* In case we know the volume ignore all others. */
 			continue;
 
 		if (vol->adj_new_minor) {
-			struct cfg_ctx tmp_ctx = { .res = ctx->res, .vol = vol };
-			schedule_deferred_cmd(&new_minor_cmd, &tmp_ctx, CFG_DISK_PREP_UP);
+			struct cfg_ctx tmp_ctx = { .cmd = ctx->cmd, .res = ctx->res, .vol = vol };
+			dcmd = adj_schedule_deferred_cmd(&new_minor_cmd, &tmp_ctx, dcmd, 0);
 			if (adjust_flags & ADJUST_NET && adjust_flags & ADJUST_DISK)
-				schedule_peer_device_options(&tmp_ctx);
+				schedule_peer_device_options(&tmp_ctx, dcmd);
 		}
 	}
+
+	if (adjust_flags & ADJUST_DISK)
+		adjust_disk(ctx, running, dcmd);
+
+	if (adjust_flags & ADJUST_NET)
+		adjust_net(ctx, running, dcmd);
+
 
 	return 0;
 }

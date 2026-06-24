@@ -24,7 +24,6 @@
 #
 
 # variables set by configure
-DISTRO = @DISTRO@
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 datarootdir = @datarootdir@
@@ -36,8 +35,6 @@ systemdpresetdir = @systemdpresetdir@
 tmpfilesdir = @tmpfilesdir@
 udevrulesdir = @udevrulesdir@
 initscripttype = @initscripttype@
-BASH_COMPLETION_SUFFIX = @BASH_COMPLETION_SUFFIX@
-UDEV_RULE_SUFFIX = @UDEV_RULE_SUFFIX@
 INITDIR = @INITDIR@
 LIBDIR = @prefix@/lib/@PACKAGE_TARNAME@
 LN_S = @LN_S@
@@ -46,8 +43,6 @@ SYSTEMD_EXEC_CONDITION = @systemd_exec_condition@
 # features enabled or disabled by configure
 WITH_UDEV = @WITH_UDEV@
 WITH_PACEMAKER = @WITH_PACEMAKER@
-WITH_HEARTBEAT = @WITH_HEARTBEAT@
-WITH_RGMANAGER = @WITH_RGMANAGER@
 WITH_BASHCOMPLETION = @WITH_BASHCOMPLETION@
 WITH_84_SUPPORT = @WITH_84_SUPPORT@
 WITH_WINDRBD = @WITH_WINDRBD@
@@ -56,7 +51,6 @@ WITH_WINDRBD = @WITH_WINDRBD@
 SYSTEMD_TEMPLATES  = drbd-services@.target
 SYSTEMD_TEMPLATES += drbd-promote@.service
 SYSTEMD_TEMPLATES += drbd-demote-or-escalate@.service
-SYSTEMD_TEMPLATES += ocf.ra@.service
 SYSTEMD_TEMPLATES += drbd-reconfigure-suspend-or-error@.service
 
 SYSTEMD_TEMPLATES += drbd@.target
@@ -77,7 +71,6 @@ SERVICE_TEMPLATES += drbd-graceful-shutdown.service
 SERVICE_TEMPLATES += drbd-promote@.service
 SERVICE_TEMPLATES += drbd-reconfigure-suspend-or-error@.service
 SERVICE_TEMPLATES += drbd-wait-promotable@.service
-SERVICE_TEMPLATES += ocf.ra@.service
 
 SCRIPT_TEMPLATES = drbd-service-shim.sh
 
@@ -92,7 +85,7 @@ endif
 
 all: $(TEMPLATES)
 
-install: install-utils install-udev install-heartbeat install-pacemaker install-rgmanager install-bashcompletion
+install: install-utils install-udev install-pacemaker install-bashcompletion
 
 install-utils: $(SERVICE_TEMPLATES) $(SCRIPT_TEMPLATES)
 	install -d $(DESTDIR)$(LIBDIR)
@@ -113,7 +106,6 @@ ifeq ($(subst both,systemd,$(initscripttype)),systemd)
 	install -m 755 drbd $(DESTDIR)$(LIBDIR)/scripts
 	install -m 755 drbd-service-shim.sh $(DESTDIR)$(LIBDIR)/scripts
 	install -m 755 drbd-wait-promotable.sh $(DESTDIR)$(LIBDIR)/scripts
-	install -m 755 ocf.ra.wrapper.sh $(DESTDIR)$(LIBDIR)/scripts
 	install -d $(DESTDIR)$(tmpfilesdir)/
 	install -m 444 drbd.tmpfiles.conf $(DESTDIR)$(tmpfilesdir)/drbd.conf
 endif
@@ -128,7 +120,6 @@ endif
 	install -m 755 outdate-peer.sh $(DESTDIR)$(LIBDIR)
 	install -m 755 snapshot-resync-target-lvm.sh $(DESTDIR)$(LIBDIR)
 	install -m 755 notify.sh $(DESTDIR)$(LIBDIR)
-	install -m 755 stonith_admin-fence-peer.sh $(DESTDIR)$(LIBDIR)
 	( set -e ; cd $(DESTDIR)$(LIBDIR) ;\
 	  $(LN_S) -f snapshot-resync-target-lvm.sh unsnapshot-resync-target-lvm.sh ;\
 	  $(LN_S) -f notify.sh notify-split-brain.sh ;\
@@ -139,20 +130,6 @@ endif
 	  $(LN_S) -f notify.sh notify-emergency-reboot.sh ;\
 	  $(LN_S) -f notify.sh notify-emergency-shutdown.sh ;\
 	  $(LN_S) -f notify.sh notify-out-of-sync.sh; )
-ifeq ($(DISTRO),debian)
-	@ echo "Don't forget to run update-rc.d"
-else
-	@ echo "Don't forget to run chkconfig"
-endif
-
-install-heartbeat:
-ifeq ($(or $(subst no,,$(WITH_84_SUPPORT))),yes)
-ifeq ($(WITH_HEARTBEAT),yes)
-	mkdir -p $(DESTDIR)$(sysconfdir)/ha.d/resource.d
-	install -m 755 drbddisk $(DESTDIR)$(sysconfdir)/ha.d/resource.d
-	install -m 755 drbdupper $(DESTDIR)$(sysconfdir)/ha.d/resource.d
-endif
-endif
 
 # Do not use $(prefix) for the resource agent. The OCF standard
 # explicitly mandates where resource agents must live,
@@ -162,6 +139,7 @@ ifeq ($(WITH_PACEMAKER),yes)
 	install -d $(DESTDIR)$(LIBDIR)
 	install -m 755 crm-fence-peer.sh $(DESTDIR)$(LIBDIR)
 	install -m 755 crm-fence-peer.9.sh $(DESTDIR)$(LIBDIR)
+	install -m 755 stonith_admin-fence-peer.sh $(DESTDIR)$(LIBDIR)
 	( set -e ; cd $(DESTDIR)$(LIBDIR) ;\
 	  $(LN_S) -f crm-fence-peer.sh crm-unfence-peer.sh ;\
 	  $(LN_S) -f crm-fence-peer.9.sh crm-unfence-peer.9.sh )
@@ -171,25 +149,16 @@ ifeq ($(WITH_PACEMAKER),yes)
 	install -m 644 drbd.shellfuncs.sh $(DESTDIR)/usr/lib/ocf/resource.d/linbit/
 endif
 
-install-rgmanager:
-ifeq ($(WITH_RGMANAGER),yes)
-	mkdir -p $(DESTDIR)$(datadir)/cluster
-	install -m 755 drbd.sh.rhcs $(DESTDIR)$(datadir)/cluster/drbd.sh
-	install -m 644 drbd.metadata.rhcs $(DESTDIR)$(datadir)/cluster/drbd.metadata
-	install -d $(DESTDIR)$(LIBDIR)
-	install -m 755 rhcs_fence $(DESTDIR)$(LIBDIR)
-endif
-
 install-udev: $(UDEV_TEMPLATES)
 ifeq ($(WITH_UDEV),yes)
 	mkdir -p $(DESTDIR)$(udevrulesdir)
-	install -m 644 drbd.rules $(DESTDIR)$(udevrulesdir)/65-drbd.rules$(UDEV_RULE_SUFFIX)
+	install -m 644 drbd.rules $(DESTDIR)$(udevrulesdir)/65-drbd.rules
 endif
 
 install-bashcompletion:
 ifeq ($(WITH_BASHCOMPLETION),yes)
-	mkdir -p $(DESTDIR)$(sysconfdir)/bash_completion.d
-	install -m 644 drbdadm.bash_completion $(DESTDIR)$(sysconfdir)/bash_completion.d/drbdadm$(BASH_COMPLETION_SUFFIX)
+	mkdir -p $(DESTDIR)$(datadir)/bash-completion/completions/
+	install -m 644 drbdadm.bash_completion $(DESTDIR)$(datadir)/bash-completion/completions/drbdadm
 endif
 
 clean:
@@ -207,9 +176,7 @@ endif
 ifeq ($(subst both,systemd,$(initscripttype)),systemd)
 	rm -f $(DESTDIR)$(systemdunitdir)/drbd.service
 endif
-	rm -f $(DESTDIR)$(sysconfdir)/ha.d/resource.d/drbddisk
-	rm -f $(DESTDIR)$(sysconfdir)/ha.d/resource.d/drbdupper
-	rm -f $(DESTDIR)$(sysconfdir)/bash_completion.d/drbdadm$(BASH_COMPLETION_SUFFIX)
+	rm -f $(DESTDIR)$(sysconfdir)/bash_completion.d/drbdadm
 	! test -L $(DESTDIR)/sbin/rcdrbd || rm $(DESTDIR)/sbin/rcdrbd
 
 .PHONY: install uninstall clean distclean

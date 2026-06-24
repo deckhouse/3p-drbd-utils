@@ -76,6 +76,7 @@
 #include "config_flags.h"
 #include "wrap_printf.h"
 #include "drbdsetup_colors.h"
+#include "drbdsetup_compat84.h"
 
 #define EXIT_NOMEM 20
 #define EXIT_NO_FAMILY 20
@@ -112,13 +113,6 @@ static bool json_output = false;
 } while(0)
 
 #define PTR_NONNULL_OR_EXIT2(p) do { PTR_NONNULL_OR_EXIT(p); PTR_NONNULL_OR_EXIT(*p); } while(0)
-
-enum usage_type {
-	BRIEF,
-	FULL,
-	XML,
-};
-
 
 enum cfg_ctx_key ctx_next_arg(enum cfg_ctx_key *key)
 {
@@ -163,37 +157,36 @@ const char *ctx_arg_string(enum cfg_ctx_key key, enum usage_type ut)
 // other functions
 static int get_af_ssocks(int warn);
 static char *af_to_str(int af);
-static void print_command_usage(struct drbd_cmd *cm, enum usage_type);
 static void print_usage_and_exit(const char *addinfo)
 		__attribute__ ((noreturn));
 static void address_json(void *address, int addr_len, char *indent);
 static void address_json_indent(void *address, int addr_len);
 
 // command functions
-static int generic_config_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int down_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int generic_events_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int del_minor_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int del_resource_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int show_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int status_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int role_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int peer_role_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int cstate_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int dstate_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int check_resize_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int show_or_get_gi_cmd(struct drbd_cmd *cm, int argc, char **argv);
-static int udev_cmd(struct drbd_cmd *cm, int argc, char **argv);
+static int generic_config_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int down_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int generic_events_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int del_minor_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int del_resource_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int show_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int status_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int role_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int peer_role_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int cstate_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int dstate_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int check_resize_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int show_or_get_gi_cmd(const struct drbd_cmd *cm, int argc, char **argv);
+static int udev_cmd(const struct drbd_cmd *cm, int argc, char **argv);
 
 // sub commands for generic_get_cmd
-       int print_event(struct drbd_cmd *, struct genl_info *, void *); /* is in drbdsetup_events2.c */
+       int print_event(const struct drbd_cmd *, struct genl_info *, void *); /* is in drbdsetup_events2.c */
        void events2_prepare_update(); /* is in drbdsetup_events2.c */
        void events2_reset(); /* is in drbdsetup_events2.c */
-static int wait_for_family(struct drbd_cmd *, struct genl_info *, void *);
-static int remember_resource(struct drbd_cmd *, struct genl_info *, void *);
-static int remember_device(struct drbd_cmd *, struct genl_info *, void *);
-static int remember_connection(struct drbd_cmd *, struct genl_info *, void *);
-static int remember_peer_device(struct drbd_cmd *, struct genl_info *, void *);
+static int wait_for_family(const struct drbd_cmd *, struct genl_info *, void *);
+static int remember_resource(const struct drbd_cmd *, struct genl_info *, void *);
+static int remember_device(const struct drbd_cmd *, struct genl_info *, void *);
+static int remember_connection(const struct drbd_cmd *, struct genl_info *, void *);
+static int remember_peer_device(const struct drbd_cmd *, struct genl_info *, void *);
 
 
 // convert functions for arguments
@@ -209,6 +202,10 @@ static struct connections_list *sort_connections(struct connections_list *);
 static struct connections_list *list_connections(char *);
 static struct peer_devices_list *list_peer_devices(char *);
 static struct paths_list *list_paths(char *);
+
+enum long_opt_only {
+	OPT_GENL_RCVBUF_SZ = 0x101,
+};
 
 struct option wait_cmds_options[] = {
 	{ "wfc-timeout", required_argument, 0, 't' },
@@ -226,6 +223,7 @@ struct option events_cmd_options[] = {
 	{ "full", no_argument, 0, 'f' },
 	{ "color", optional_argument, 0, 'c' },
 	{ "diff", optional_argument, 0, 'i' },
+	{ "rcvbuf", required_argument, 0, OPT_GENL_RCVBUF_SZ },
 	{ }
 };
 
@@ -248,18 +246,62 @@ static struct option status_cmd_options[] = {
 #define F_NEW_EVENTS_CMD(scmd)	DRBD_ADM_GET_INITIAL_STATE, NO_PAYLOAD, generic_events_cmd, \
 			.handle_reply = scmd
 
-struct drbd_cmd commands[] = {
-	{"primary", CTX_RESOURCE, DRBD_ADM_PRIMARY, DRBD_NLA_SET_ROLE_PARMS,
+const struct drbd_cmd connect_cmd = {"connect", CTX_PEER_NODE,
+				     DRBD_ADM_CONNECT, DRBD_NLA_CONNECT_PARMS,
+				     F_CONFIG_CMD,
+	.ctx = &connect_cmd_ctx,
+	.summary = "Attempt to (re)establish a replication link to a peer host."};
+
+const struct drbd_cmd new_peer_cmd = {"new-peer", CTX_PEER_NODE,
+				      DRBD_ADM_NEW_PEER, DRBD_NLA_NET_CONF,
+				      F_CONFIG_CMD,
+	.ctx = &new_peer_cmd_ctx,
+	.summary = "Make a peer host known to a resource."};
+
+const struct drbd_cmd del_peer_cmd = {"del-peer", CTX_PEER_NODE,
+				      DRBD_ADM_DEL_PEER, DRBD_NLA_DISCONNECT_PARMS,
+				      F_CONFIG_CMD,
+	.ctx = &disconnect_cmd_ctx,
+	.summary = "Remove a connection to a peer host."};
+
+const struct drbd_cmd new_path_cmd = {"new-path", CTX_PEER_NODE,
+				      DRBD_ADM_NEW_PATH, DRBD_NLA_PATH_PARMS,
+				      F_CONFIG_CMD,
+	.drbd_args = (struct drbd_argument[]) {
+		{"local-addr",  T_my_addr,   conv_addr},
+		{"remote-addr", T_peer_addr, conv_addr},
+		{}},
+	.ctx = &path_cmd_ctx,
+	.summary = "Add a path (endpoint address pair) where a peer host should be reachable."};
+
+const struct drbd_cmd del_path_cmd = {"del-path", CTX_PEER_NODE,
+				      DRBD_ADM_DEL_PATH, DRBD_NLA_PATH_PARMS,
+				      F_CONFIG_CMD,
+	.drbd_args = (struct drbd_argument[]) {
+		{"local-addr",  T_my_addr,   conv_addr},
+		{"remote-addr", T_peer_addr, conv_addr},
+		{}},
+	.ctx = &path_cmd_ctx,
+	.summary = "Remove a path (endpoint address pair) from a connection to a peer host."};
+
+const struct drbd_cmd disconnect_cmd = {"disconnect", CTX_PEER_NODE,
+					DRBD_ADM_DISCONNECT, DRBD_NLA_DISCONNECT_PARMS,
+					F_CONFIG_CMD,
+	.ctx = &disconnect_cmd_ctx,
+	.summary = "Unconnect from a peer host."};
+
+const struct drbd_cmd *commands[] = {
+	&(struct drbd_cmd){"primary", CTX_RESOURCE, DRBD_ADM_PRIMARY, DRBD_NLA_SET_ROLE_PARMS,
 		F_CONFIG_CMD,
 	 .ctx = &primary_cmd_ctx,
 	 .summary = "Change the role of a node in a resource to primary." },
 
-	{"secondary", CTX_RESOURCE, DRBD_ADM_SECONDARY, DRBD_NLA_SET_ROLE_PARMS,
+	&(struct drbd_cmd){"secondary", CTX_RESOURCE, DRBD_ADM_SECONDARY, DRBD_NLA_SET_ROLE_PARMS,
 		F_CONFIG_CMD,
 	 .ctx = &secondary_cmd_ctx,
 	 .summary = "Change the role of a node in a resource to secondary." },
 
-	{"attach", CTX_MINOR, DRBD_ADM_ATTACH, DRBD_NLA_DISK_CONF,
+	&(struct drbd_cmd){"attach", CTX_MINOR, DRBD_ADM_ATTACH, DRBD_NLA_DISK_CONF,
 		F_CONFIG_CMD,
 	 .drbd_args = (struct drbd_argument[]) {
 		 { "lower_dev",		T_backing_dev,	conv_block_dev },
@@ -269,204 +311,169 @@ struct drbd_cmd commands[] = {
 	 .ctx = &attach_cmd_ctx,
 	 .summary = "Attach a lower-level device to an existing replicated device." },
 
-	{"disk-options", CTX_MINOR, DRBD_ADM_CHG_DISK_OPTS, DRBD_NLA_DISK_CONF,
+	&(struct drbd_cmd){"disk-options", CTX_MINOR, DRBD_ADM_CHG_DISK_OPTS, DRBD_NLA_DISK_CONF,
 		F_CONFIG_CMD,
 	 .set_defaults = true,
 	 .ctx = &disk_options_ctx,
 	 .summary = "Change the disk options of an attached lower-level device." },
 
-	{"detach", CTX_MINOR, DRBD_ADM_DETACH, DRBD_NLA_DETACH_PARMS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"detach", CTX_MINOR, DRBD_ADM_DETACH, DRBD_NLA_DETACH_PARMS, F_CONFIG_CMD,
 	 .ctx = &detach_cmd_ctx,
 	 .summary = "Detach the lower-level device of a replicated device." },
 
-	{"connect", CTX_PEER_NODE,
-		DRBD_ADM_CONNECT, DRBD_NLA_CONNECT_PARMS,
-		F_CONFIG_CMD,
-	 .ctx = &connect_cmd_ctx,
-	 .summary = "Attempt to (re)establish a replication link to a peer host." },
+	&connect_cmd,
+	&new_peer_cmd,
+	&del_peer_cmd,
+	&new_path_cmd,
+	&del_path_cmd,
 
-	{"new-peer", CTX_PEER_NODE,
-		DRBD_ADM_NEW_PEER, DRBD_NLA_NET_CONF,
-		F_CONFIG_CMD,
-	 .ctx = &new_peer_cmd_ctx,
-	 .summary = "Make a peer host known to a resource." },
-
-	{"del-peer", CTX_PEER_NODE,
-		DRBD_ADM_DEL_PEER, DRBD_NLA_DISCONNECT_PARMS,
-		F_CONFIG_CMD,
-	 .ctx = &disconnect_cmd_ctx,
-	 .summary = "Remove a connection to a peer host." },
-
-	{"new-path", CTX_PEER_NODE,
-		DRBD_ADM_NEW_PATH, DRBD_NLA_PATH_PARMS,
-		F_CONFIG_CMD,
-	 .drbd_args = (struct drbd_argument[]) {
-		{ "local-addr", T_my_addr, conv_addr },
-		{ "remote-addr", T_peer_addr, conv_addr },
-		{ } },
-	 .ctx = &path_cmd_ctx,
-	 .summary = "Add a path (endpoint address pair) where a peer host should be reachable." },
-
-	{"del-path", CTX_PEER_NODE,
-		DRBD_ADM_DEL_PATH, DRBD_NLA_PATH_PARMS,
-		F_CONFIG_CMD,
-	 .drbd_args = (struct drbd_argument[]) {
-		{ "local-addr", T_my_addr, conv_addr },
-		{ "remote-addr", T_peer_addr, conv_addr },
-		{ } },
-	 .ctx = &path_cmd_ctx,
-	 .summary = "Remove a path (endpoint address pair) from a connection to a peer host." },
-
-	{"net-options", CTX_PEER_NODE, DRBD_ADM_CHG_NET_OPTS, DRBD_NLA_NET_CONF,
+	&(struct drbd_cmd){"net-options", CTX_PEER_NODE, DRBD_ADM_CHG_NET_OPTS, DRBD_NLA_NET_CONF,
 		F_CONFIG_CMD,
 	 .set_defaults = true,
 	 .ctx = &net_options_ctx,
 	 .summary = "Change the network options of a connection." },
 
-	{"disconnect", CTX_PEER_NODE, DRBD_ADM_DISCONNECT, DRBD_NLA_DISCONNECT_PARMS,
-		F_CONFIG_CMD,
-	 .ctx = &disconnect_cmd_ctx,
-	 .summary = "Unconnect from a peer host." },
+	&disconnect_cmd,
 
-	{"resize", CTX_MINOR, DRBD_ADM_RESIZE, DRBD_NLA_RESIZE_PARMS,
+	&(struct drbd_cmd){"resize", CTX_MINOR, DRBD_ADM_RESIZE, DRBD_NLA_RESIZE_PARMS,
 		F_CONFIG_CMD,
 	 .ctx = &resize_cmd_ctx,
 	 .summary = "Reexamine the lower-level device sizes to resize a replicated device." },
 
-	{"resource-options", CTX_RESOURCE, DRBD_ADM_RESOURCE_OPTS, DRBD_NLA_RESOURCE_OPTS,
+	&(struct drbd_cmd){"resource-options", CTX_RESOURCE, DRBD_ADM_RESOURCE_OPTS, DRBD_NLA_RESOURCE_OPTS,
 		F_CONFIG_CMD,
 	 .set_defaults = true,
 	 .ctx = &resource_options_ctx,
 	 .summary = "Change the resource options of an existing resource." },
 
-	{"peer-device-options", CTX_PEER_DEVICE, DRBD_ADM_CHG_PEER_DEVICE_OPTS,
+	&(struct drbd_cmd){"peer-device-options", CTX_PEER_DEVICE, DRBD_ADM_CHG_PEER_DEVICE_OPTS,
 		DRBD_NLA_PEER_DEVICE_OPTS, F_CONFIG_CMD,
 	 .set_defaults = true,
 	 .ctx = &peer_device_options_ctx,
 	 .summary = "Change peer-device options." },
 
-	{"new-current-uuid", CTX_MINOR, DRBD_ADM_NEW_C_UUID, DRBD_NLA_NEW_C_UUID_PARMS,
+	&(struct drbd_cmd){"new-current-uuid", CTX_MINOR, DRBD_ADM_NEW_C_UUID, DRBD_NLA_NEW_C_UUID_PARMS,
 		F_CONFIG_CMD,
 	 .ctx = &new_current_uuid_cmd_ctx,
 	 .summary = "Generate a new current UUID." },
 
-	{"invalidate", CTX_MINOR, DRBD_ADM_INVALIDATE, DRBD_NLA_INVALIDATE_PARMS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"invalidate", CTX_MINOR, DRBD_ADM_INVALIDATE, DRBD_NLA_INVALIDATE_PARMS, F_CONFIG_CMD,
 	 .ctx = &invalidate_ctx,
 	 .summary = "Replace the local data of a volume with that of a peer." },
-	{"invalidate-remote", CTX_PEER_DEVICE, DRBD_ADM_INVAL_PEER, DRBD_NLA_INVAL_PEER_PARAMS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"invalidate-remote", CTX_PEER_DEVICE, DRBD_ADM_INVAL_PEER, DRBD_NLA_INVAL_PEER_PARAMS, F_CONFIG_CMD,
 	 .ctx = &invalidate_peer_ctx,
 	 .summary = "Replace a peer's data of a volume with the local data." },
-	{"pause-sync", CTX_PEER_DEVICE, DRBD_ADM_PAUSE_SYNC, NO_PAYLOAD, F_CONFIG_CMD,
+	&(struct drbd_cmd){"pause-sync", CTX_PEER_DEVICE, DRBD_ADM_PAUSE_SYNC, NO_PAYLOAD, F_CONFIG_CMD,
 	 .summary = "Stop resynchronizing between a local and a peer device." },
-	{"resume-sync", CTX_PEER_DEVICE, DRBD_ADM_RESUME_SYNC, NO_PAYLOAD, F_CONFIG_CMD,
+	&(struct drbd_cmd){"resume-sync", CTX_PEER_DEVICE, DRBD_ADM_RESUME_SYNC, NO_PAYLOAD, F_CONFIG_CMD,
 	 .summary = "Allow resynchronization to resume on a replicated device." },
-	{"suspend-io", CTX_MINOR, DRBD_ADM_SUSPEND_IO, NO_PAYLOAD, F_CONFIG_CMD,
+	&(struct drbd_cmd){"suspend-io", CTX_MINOR, DRBD_ADM_SUSPEND_IO, NO_PAYLOAD, F_CONFIG_CMD,
 	 .summary = "Suspend I/O on a replicated device." },
-	{"resume-io", CTX_MINOR, DRBD_ADM_RESUME_IO, NO_PAYLOAD, F_CONFIG_CMD,
+	&(struct drbd_cmd){"resume-io", CTX_MINOR, DRBD_ADM_RESUME_IO, NO_PAYLOAD, F_CONFIG_CMD,
 	 .summary = "Resume I/O on a replicated device." },
-	{"outdate", CTX_MINOR, DRBD_ADM_OUTDATE, NO_PAYLOAD, F_CONFIG_CMD,
+	&(struct drbd_cmd){"outdate", CTX_MINOR, DRBD_ADM_OUTDATE, NO_PAYLOAD, F_CONFIG_CMD,
 	 .summary = "Mark the data on a lower-level device as outdated." },
-	{"verify", CTX_PEER_DEVICE, DRBD_ADM_START_OV, DRBD_NLA_START_OV_PARMS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"verify", CTX_PEER_DEVICE, DRBD_ADM_START_OV, DRBD_NLA_START_OV_PARMS, F_CONFIG_CMD,
 	 .ctx = &verify_cmd_ctx,
 	 .summary = "Verify the data on a lower-level device against a peer device." },
-	{"down", CTX_RESOURCE | CTX_ALL, DRBD_ADM_DOWN, NO_PAYLOAD, down_cmd,
+	&(struct drbd_cmd){"down", CTX_RESOURCE | CTX_ALL, DRBD_ADM_DOWN, NO_PAYLOAD, down_cmd,
 	 .missing_ok = true,
 	 .warn_on_missing = true,
 	 .summary = "Take a resource down." },
-	{"role", CTX_RESOURCE, 0, NO_PAYLOAD, role_cmd,
+	&(struct drbd_cmd){"role", CTX_RESOURCE, 0, NO_PAYLOAD, role_cmd,
 	 .lockless = true,
 	 .summary = "Show the current role of a resource." },
-	{"peer-role", CTX_PEER_NODE, 0, NO_PAYLOAD, peer_role_cmd,
+	&(struct drbd_cmd){"peer-role", CTX_PEER_NODE, 0, NO_PAYLOAD, peer_role_cmd,
 	 .lockless = true,
 	 .summary = "Show the current role of a peer." },
-	{"cstate", CTX_PEER_NODE, 0, NO_PAYLOAD, cstate_cmd,
+	&(struct drbd_cmd){"cstate", CTX_PEER_NODE, 0, NO_PAYLOAD, cstate_cmd,
 	 .lockless = true,
 	 .summary = "Show the current state of a connection." },
-	{"dstate", CTX_MINOR, 0, NO_PAYLOAD, dstate_cmd,
+	&(struct drbd_cmd){"dstate", CTX_MINOR, 0, NO_PAYLOAD, dstate_cmd,
 	 .lockless = true,
 	 .summary = "Show the current disk state of a lower-level device." },
-	{"show-gi", CTX_PEER_DEVICE, 0, NO_PAYLOAD, show_or_get_gi_cmd,
+	&(struct drbd_cmd){"show-gi", CTX_PEER_DEVICE, 0, NO_PAYLOAD, show_or_get_gi_cmd,
 	 .lockless = true,
 	 .summary = "Show the data generation identifiers for a device on a particular connection, with explanations." },
-	{"get-gi", CTX_PEER_DEVICE, 0, NO_PAYLOAD, show_or_get_gi_cmd,
+	&(struct drbd_cmd){"get-gi", CTX_PEER_DEVICE, 0, NO_PAYLOAD, show_or_get_gi_cmd,
 	 .lockless = true,
 	 .summary = "Show the data generation identifiers for a device on a particular connection." },
-	{"show", CTX_RESOURCE | CTX_ALL, 0, 0, show_cmd,
+	&(struct drbd_cmd){"show", CTX_RESOURCE | CTX_ALL, 0, 0, show_cmd,
 	 .options = show_cmd_options,
 	 .lockless = true,
 	 .summary = "Show the current configuration of a resource, or of all resources." },
-	{"status", CTX_RESOURCE | CTX_ALL, 0, 0, status_cmd,
+	&(struct drbd_cmd){"status", CTX_RESOURCE | CTX_ALL, 0, 0, status_cmd,
 	 .options = status_cmd_options,
 	 .lockless = true,
 	 .summary = "Show the state of a resource, or of all resources." },
-	{"check-resize", CTX_MINOR, 0, NO_PAYLOAD, check_resize_cmd,
+	&(struct drbd_cmd){"check-resize", CTX_MINOR, 0, NO_PAYLOAD, check_resize_cmd,
 	 .lockless = true,
 	 .summary = "Remember the current size of a lower-level device." },
-	{"events2", CTX_RESOURCE | CTX_ALL, F_NEW_EVENTS_CMD(print_event),
+	&(struct drbd_cmd){"events2", CTX_RESOURCE | CTX_ALL, F_NEW_EVENTS_CMD(print_event),
 	 .options = events_cmd_options,
 	 .missing_ok = true,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Show the current state and all state changes of a resource, or of all resources." },
-	{"wait-sync-volume", CTX_PEER_DEVICE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-sync-volume", CTX_PEER_DEVICE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until resync finished on a volume." },
-	{"wait-sync-connection", CTX_PEER_NODE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-sync-connection", CTX_PEER_NODE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until resync finished on all volumes of a connection." },
-	{"wait-sync-resource", CTX_RESOURCE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-sync-resource", CTX_RESOURCE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until resync finished on all volumes." },
-	{"wait-connect-volume", CTX_PEER_DEVICE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-connect-volume", CTX_PEER_DEVICE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until a device on a peer is visible." },
-	{"wait-connect-connection", CTX_PEER_NODE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-connect-connection", CTX_PEER_NODE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until all peer volumes of connection are visible." },
-	{"wait-connect-resource", CTX_RESOURCE, F_NEW_EVENTS_CMD(wait_for_family),
+	&(struct drbd_cmd){"wait-connect-resource", CTX_RESOURCE, F_NEW_EVENTS_CMD(wait_for_family),
 	 .options = wait_cmds_options,
 	 .continuous_poll = true,
 	 .lockless = true,
 	 .summary = "Wait until all connections are establised." },
 
-	{"new-resource", CTX_RESOURCE, DRBD_ADM_NEW_RESOURCE, DRBD_NLA_RESOURCE_OPTS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"new-resource", CTX_RESOURCE, DRBD_ADM_NEW_RESOURCE, DRBD_NLA_RESOURCE_OPTS, F_CONFIG_CMD,
 	 .drbd_args = (struct drbd_argument[]) {
 		 { "node_id",		T_node_id,	conv_u32 },
 		 { } },
 	 .ctx = &resource_options_ctx,
 	 .summary = "Create a new resource." },
 
-	{"new-minor", CTX_RESOURCE | CTX_MINOR | CTX_VOLUME | CTX_MULTIPLE_ARGUMENTS,
+	&(struct drbd_cmd){"new-minor", CTX_RESOURCE | CTX_MINOR | CTX_VOLUME | CTX_MULTIPLE_ARGUMENTS,
 		DRBD_ADM_NEW_MINOR, DRBD_NLA_DEVICE_CONF,
 		F_CONFIG_CMD,
 	 .ctx = &device_options_ctx,
 	 .summary = "Create a new replicated device within a resource." },
 
-	{"del-minor", CTX_MINOR, DRBD_ADM_DEL_MINOR, NO_PAYLOAD, del_minor_cmd,
+	&(struct drbd_cmd){"del-minor", CTX_MINOR, DRBD_ADM_DEL_MINOR, NO_PAYLOAD, del_minor_cmd,
 	 .summary = "Remove a replicated device." },
-	{"del-resource", CTX_RESOURCE, DRBD_ADM_DEL_RESOURCE, NO_PAYLOAD, del_resource_cmd,
+	&(struct drbd_cmd){"del-resource", CTX_RESOURCE, DRBD_ADM_DEL_RESOURCE, NO_PAYLOAD, del_resource_cmd,
 	 .summary = "Remove a resource." },
-	{"forget-peer", CTX_RESOURCE, DRBD_ADM_FORGET_PEER, DRBD_NLA_FORGET_PEER_PARMS, F_CONFIG_CMD,
+	&(struct drbd_cmd){"forget-peer", CTX_RESOURCE, DRBD_ADM_FORGET_PEER, DRBD_NLA_FORGET_PEER_PARMS, F_CONFIG_CMD,
 	 .drbd_args = (struct drbd_argument[]) {
 		 { "peer_node_id",	T_forget_peer_node_id,	conv_u32 },
 		 { } },
-	 .summary = "Completely remove any reference to a unconnected peer from meta-data." },
-	{"rename-resource", CTX_RESOURCE, DRBD_ADM_RENAME_RESOURCE, DRBD_NLA_RENAME_RESOURCE_PARMS, F_CONFIG_CMD,
+	 .summary = "Completely remove any reference to an unconnected peer from meta-data." },
+	&(struct drbd_cmd){"rename-resource", CTX_RESOURCE, DRBD_ADM_RENAME_RESOURCE, DRBD_NLA_RENAME_RESOURCE_PARMS, F_CONFIG_CMD,
 	.drbd_args = (struct drbd_argument[]) {
 		{ "new_name", T_new_resource_name, conv_str },
 		{ } },
 	.summary = "Rename a resource." },
-	{"udev", CTX_MINOR, 0, NO_PAYLOAD, udev_cmd,
+	&(struct drbd_cmd){"udev", CTX_MINOR, 0, NO_PAYLOAD, udev_cmd,
 	.lockless = true,
 	.summary = "Generate output for udev rules."},
 };
@@ -751,7 +758,7 @@ static void split_address(int *af, char** address, int* port)
 		*port = 7788;
 }
 
-static int sockaddr_from_str(struct sockaddr_storage *storage, const char *str)
+int sockaddr_from_str(struct sockaddr_storage *storage, const char *str)
 {
 	int af, port;
 	char *address = strdupa(str);
@@ -847,7 +854,7 @@ static int get_af_ssocks(int warn_and_use_default)
 	return af;
 }
 
-static struct option *make_longoptions(struct drbd_cmd *cm)
+struct option *make_longoptions(const struct drbd_cmd *cm)
 {
 	static struct option buffer[47];
 	int i = 0;
@@ -1024,7 +1031,7 @@ static void warn_print_excess_args(int argc, char **argv, int i)
 	fprintf(stderr, "Excess arguments:");
 	for (; i < argc; i++)
 		fprintf(stderr, " %s", argv[i]);
-	printf("\n");
+	fprintf(stderr, "\n");
 }
 
 int drbd_tla_parse(struct nlattr *tla[], struct nlmsghdr *nlh)
@@ -1038,7 +1045,7 @@ int drbd_tla_parse(struct nlattr *tla[], struct nlmsghdr *nlh)
 #define ASSERT(exp) if (!(exp)) \
 		fprintf(stderr,"ASSERT( " #exp " ) in %s:%d\n", __FILE__,__LINE__);
 
-static int _generic_config_cmd(struct drbd_cmd *cm, int argc, char **argv)
+int _generic_config_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct drbd_argument *ad;
 	struct nlattr *nla;
@@ -1127,6 +1134,23 @@ static int _generic_config_cmd(struct drbd_cmd *cm, int argc, char **argv)
 
 	for (i = optind, ad = cm->drbd_args; ad && ad->name; i++) {
 		if (argc < i + 1) {
+#ifdef WITH_84_SUPPORT
+			if (strcmp(cm->cmd, "new-resource") == 0 && strcmp(ad->name, "node_id") == 0) {
+				/* This is the "new-resource" command, and we are missing the node_id argument.
+				 * This might be the user trying to use the old drbd8-style command line syntax.
+				 * Set the node ID to the magic value (u32)-1 for now and tell the kernel that
+				 * we are using the drbd8 compatibility mode.
+				 * The node ID will later be overwritten to the correct value (arbitrated by the IP address)
+				 * when the "connect" command is called.
+				 */
+				fprintf(stderr, "new-resource called without node-id: enabling drbd8 compat mode\n");
+				nla = nla_nest_start(smsg, cm->tla_id);
+				nla_put_u32(smsg, ad->nla_type, -1);
+				nla_put_u8(smsg, T_drbd8_compat_mode, 1);
+				ad++;
+				continue;
+			}
+#endif
 			fprintf(stderr, "Missing argument '%s'\n", ad->name);
 			print_command_usage(cm, FULL);
 			rv = OTHER_ERROR;
@@ -1233,12 +1257,12 @@ error:
 	return rv;
 }
 
-static int generic_config_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int generic_config_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	return _generic_config_cmd(cm, argc, argv);
 }
 
-static int del_minor_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int del_minor_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	int rv;
 
@@ -1248,7 +1272,7 @@ static int del_minor_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return rv;
 }
 
-static int del_resource_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int del_resource_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	int rv;
 
@@ -1258,26 +1282,54 @@ static int del_resource_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return rv;
 }
 
-static struct drbd_cmd *find_cmd_by_name(const char *name)
+static const struct drbd_cmd *find_cmd_by_name(const char *name)
 {
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(commands); i++) {
-		if (!strcmp(name, commands[i].cmd)) {
-			return commands + i;
+		if (!strcmp(name, commands[i]->cmd)) {
+			return commands[i];
 		}
 	}
 	return NULL;
 }
 
-static void print_options(struct nlattr *attr, struct context_def *ctx, const char *sect_name)
+bool should_show_field_info_from_attr_tb(struct nlattr **nlattr_p, const char **str_p, bool *is_default_p,
+		struct nlattr **nlattr_tb, struct field_def *field, struct context_def *ctx)
+{
+	/* If not present (*nlattr == NULL), kernel does not know about this
+	 * field, so can not support it.  Unless kernel chose to not report
+	 * specific fields, even though it knows about them. We currently do
+	 * not have those.  Pretend it was NOT set to the default,
+	 * so it is shown even without "--show-defaults". */
+
+	bool is_default = false;
+	struct nlattr *nlattr;
+	const char *str = NULL;
+
+	nlattr = nlattr_tb[__nla_type(field->nla_type)];
+	if (nlattr) {
+		str = field->ops->get(ctx, field, nlattr);
+		is_default = field->ops->is_default(field, str);
+	}
+	if (is_default_p)
+		*is_default_p = is_default;
+	if (nlattr_p)
+		*nlattr_p = nlattr;
+	if (str_p)
+		*str_p = str;
+
+	return !is_default || show_defaults;
+}
+
+static bool __print_options(struct nlattr *attr, struct context_def *ctx, const char *sect_name,
+			    bool opened, bool close)
 {
 	struct nlattr *nested_attr_tb[128];
 	struct field_def *field;
-	int opened = 0;
 
 	if (!attr)
-		return;
+		return false;
 
 	if (drbd_nla_parse_nested(nested_attr_tb, ctx->nla_policy_size - 1,
 				  attr, ctx->nla_policy)) {
@@ -1290,58 +1342,65 @@ static void print_options(struct nlattr *attr, struct context_def *ctx, const ch
 		const char *str;
 		bool is_default;
 
-		nlattr = nested_attr_tb[__nla_type(field->nla_type)];
-		if (!nlattr)
+		if (!should_show_field_info_from_attr_tb(
+					&nlattr, &str, &is_default,
+					nested_attr_tb, field, ctx))
 			continue;
-		str = field->ops->get(ctx, field, nlattr);
-		is_default = field->ops->is_default(field, str);
-		if (is_default && !show_defaults)
-			continue;
+
 		if (!opened) {
-			opened=1;
+			opened = true;
 			printI("%s {\n",sect_name);
 			++indent;
 		}
-		if (field->needs_double_quoting)
-			str = double_quote_string(str);
-		printI("%-16s\t%s;",field->name, str);
-		if (field->unit || is_default) {
-				printf(" # ");
-			if (field->unit)
-				printf("%s", field->unit);
-			if (field->unit && is_default)
-				printf(", ");
-			if (is_default)
-				printf("default");
+		if (nlattr) {
+			if (field->needs_double_quoting)
+				str = double_quote_string(str);
+			printI("%-16s\t%s;",field->name, str);
+			if (field->unit || is_default) {
+					printf(" # ");
+				if (field->unit)
+					printf("%s", field->unit);
+				if (field->unit && is_default)
+					printf(", ");
+				if (is_default)
+					printf("default");
+			}
+			printf("\n");
+		} else {
+			printI("_unknown %-14s;\t# not supported by kernel\n", field->name);
 		}
-		printf("\n");
 	}
-	if(opened) {
+	if (opened && close) {
 		--indent;
 		printI("}\n");
 	}
+
+	return opened;
+}
+
+static void print_options(struct nlattr *attr, struct context_def *ctx, const char *sect_name)
+{
+	__print_options(attr, ctx, sect_name, false, true);
 }
 
 static int nr_printed_opts(struct context_def *ctx, struct field_def *start,
 		struct nlattr **nested_attr_tb)
 {
 	struct field_def *field;
-	const char *str;
-	bool is_default;
+	struct nlattr *nlattr;
 
 	int nr = -1;
 	if (start == NULL)
 		return nr;
 
 	for (field = start; field->name; field++) {
-		struct nlattr *nlattr = nested_attr_tb[__nla_type(field->nla_type)];
+		if (!should_show_field_info_from_attr_tb(&nlattr, NULL, NULL, nested_attr_tb, field, ctx))
+			continue;
+		/* Json is data only, no "comments".
+		 * If _we_ know about it, AND kernel knows about it, we'd report it.
+		 * If we know it, but we don't report it, it is unsuported by kernel. */
 		if (!nlattr)
 			continue;
-		str = field->ops->get(ctx, field, nlattr);
-		is_default = field->ops->is_default(field, str);
-		if (is_default && !show_defaults)
-			continue;
-
 		nr++;
 	}
 
@@ -1377,12 +1436,11 @@ static bool print_options_json(
 		const char *str;
 		bool is_default;
 
-		nlattr = nested_attr_tb[__nla_type(field->nla_type)];
-		if (!nlattr)
+		if (!should_show_field_info_from_attr_tb(
+					&nlattr, &str, &is_default,
+					nested_attr_tb, field, ctx))
 			continue;
-		str = field->ops->get(ctx, field, nlattr);
-		is_default = field->ops->is_default(field, str);
-		if (is_default && !show_defaults)
+		if (!nlattr) /* unsupported by kernel */
 			continue;
 		if (!opened) {
 			opened=1;
@@ -1570,7 +1628,7 @@ bool opt_timestamps;
 bool opt_diff;
 bool opt_fullch;
 
-static int generic_send(struct drbd_cmd *cm)
+static int generic_send(const struct drbd_cmd *cm)
 {
 	struct drbd_genlmsghdr *dhdr;
 	struct msg_buff *smsg;
@@ -1603,7 +1661,7 @@ static int generic_send(struct drbd_cmd *cm)
 	return err;
 }
 
-static int generic_recv(struct drbd_cmd *cm, int timeout_arg, void *u_ptr, int extra_poll_fd, bool expect_reply)
+static int generic_recv(const struct drbd_cmd *cm, int timeout_arg, void *u_ptr, int extra_poll_fd, bool expect_reply)
 {
 	struct nlattr *tla[ARRAY_SIZE(drbd_tla_nl_policy)] = { 0, };
 	char *desc = NULL;
@@ -1827,13 +1885,15 @@ static int generic_recv(struct drbd_cmd *cm, int timeout_arg, void *u_ptr, int e
 	}
 
 out:
+	if (err && desc)
+		fprintf(stderr, "error desciption: %s\n", desc);
 	if (!err)
 		err = check_error(rv, desc, tla, (struct nlmsghdr *)iov.iov_base);
 	free(iov.iov_base);
 	return err;
 }
 
-static int generic_get(struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
+static int generic_get(const struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
 {
 	int err;
 
@@ -1844,7 +1904,7 @@ static int generic_get(struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
 	return generic_recv(cm, timeout_arg, u_ptr, -1, true);
 }
 
-static int events2_poll(struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
+static int events2_poll(const struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
 {
 	int err;
 	bool send_request = true;
@@ -1903,7 +1963,7 @@ static int events2_poll(struct drbd_cmd *cm, int timeout_arg, void *u_ptr)
 	return 0;
 }
 
-static int generic_events_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int generic_events_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	static struct option no_options[] = { { } };
 	struct choose_timeout_ctx timeo_ctx = {
@@ -1915,6 +1975,7 @@ static int generic_events_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	struct peer_devices_list *peer_devices = NULL;
 	struct option *options = cm->options ? cm->options : no_options;
 	const char *opts = make_optstring(options);
+	struct drbd_cmd tmp_cm;
 
 	optind = 0;  /* reset getopt_long() */
 	for(;;) {
@@ -1925,6 +1986,9 @@ static int generic_events_cmd(struct drbd_cmd *cm, int argc, char **argv)
 		default:
 		case '?':
 			return 20;
+		case OPT_GENL_RCVBUF_SZ:
+			/* already handled before genl_connect() */
+			break;
 		case 't':
 			timeo_ctx.wfc_timeout = m_strtoll(optarg, 1);
 			if(DRBD_WFC_TIMEOUT_MIN > timeo_ctx.wfc_timeout ||
@@ -2016,7 +2080,9 @@ static int generic_events_cmd(struct drbd_cmd *cm, int argc, char **argv)
 		 *
 		 * When --poll is also set, we block at the point where we
 		 * attempt to read from stdin. */
-		cm->continuous_poll = false;
+		tmp_cm = *cm;
+		tmp_cm.continuous_poll = false;
+		cm = &tmp_cm;
 	} else {
 		if (genl_join_mc_group_and_ctrl(drbd_sock, "events")) {
 			fprintf(stderr,"%s: unable to join drbd events multicast group\n", objname);
@@ -2099,21 +2165,9 @@ static bool options_empty(struct nlattr *attr, struct context_def *ctx)
 		fprintf(stderr, "nla_policy violation\n");
 	}
 
-	for (field = ctx->fields; field->name; field++) {
-		struct nlattr *nlattr;
-		const char *str;
-		bool is_default;
-
-		nlattr = nested_attr_tb[__nla_type(field->nla_type)];
-		if (!nlattr)
-			continue;
-		str = field->ops->get(ctx, field, nlattr);
-		is_default = field->ops->is_default(field, str);
-		if (is_default && !show_defaults)
-			continue;
-		return false;
-	}
-
+	for (field = ctx->fields; field->name; field++)
+		if (should_show_field_info_from_attr_tb(NULL, NULL, NULL, nested_attr_tb, field, ctx))
+			return false;
 	return true;
 }
 
@@ -2192,8 +2246,7 @@ static void show_connection(struct connections_list *connection, struct peer_dev
 	printI("_peer_node_id %d;\n", connection->ctx.ctx_peer_node_id);
 
 	print_paths(connection);
-	if (connection->info.conn_connection_state == C_STANDALONE)
-		printI("_is_standalone;\n");
+	printI("_cstate %s;\n", drbd_conn_str(connection->info.conn_connection_state));
 	print_options(connection->net_conf, &show_net_options_ctx, "net");
 
 	for (peer_device = peer_devices; peer_device; peer_device = peer_device->next) {
@@ -2236,6 +2289,8 @@ static void show_connection_json(struct connections_list *connection, struct pee
 	print_paths(connection);
 	if (connection->info.conn_connection_state == C_STANDALONE)
 		printI(QUOTED("_is_standalone") ": true,\n");
+	printI(QUOTED("_cstate") ": %s,\n",
+	       double_quote_string(drbd_conn_str(connection->info.conn_connection_state)));
 	print_options_json(connection->net_conf, &show_net_options_ctx, "net", false, true);
 
 	if (has_disk_options)
@@ -2307,6 +2362,8 @@ static void show_volume_json(struct devices_list *device)
 
 static void show_volume(struct devices_list *device)
 {
+	bool opened;
+
 	printI("volume %d {\n", device->ctx.ctx_volume);
 	++indent;
 	printI("device\t\t\tminor %d;\n", device->minor);
@@ -2331,7 +2388,8 @@ static void show_volume(struct devices_list *device)
 		printI("disk\t\t\tnone;\n");
 	}
 
-	print_options(device->disk_conf_nl, &attach_cmd_ctx, "disk");
+	opened = __print_options(device->disk_conf_nl, &attach_cmd_ctx, "disk", false, false);
+	__print_options(device->device_conf_nl, &device_options_ctx, "disk", opened, true);
 	--indent;
 	printI("}\n"); /* close volume */
 }
@@ -2484,7 +2542,7 @@ static void show_resource_list_json(struct resources_list *resources_list, char*
 	printI("]\n");
 }
 
-static int show_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int show_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct resources_list *resources_list;
 	char *old_objname = objname;
@@ -3313,7 +3371,7 @@ static void link_peer_devices_to_devices(struct peer_devices_list *peer_devices,
 	}
 }
 
-static int status_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int status_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct resources_list *resources, *resource;
 	struct sigaction sa = {
@@ -3426,7 +3484,7 @@ static int status_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return 0;
 }
 
-static int role_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int role_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct resources_list *resources, *resource;
 	int ret = ERR_RES_NOT_KNOWN;
@@ -3451,7 +3509,7 @@ static int role_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return 0;
 }
 
-static int peer_role_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int peer_role_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct connections_list *connections, *connection;
 	bool found = false;
@@ -3474,7 +3532,7 @@ static int peer_role_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return 0;
 }
 
-static int cstate_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int cstate_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct connections_list *connections, *connection;
 	bool found = false;
@@ -3497,7 +3555,7 @@ static int cstate_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return 0;
 }
 
-static int dstate_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int dstate_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct devices_list *devices, *device;
 	bool found = false;
@@ -3532,7 +3590,7 @@ static int dstate_cmd(struct drbd_cmd *cm, int argc, char **argv)
 	return 0;
 }
 
-static int udev_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int udev_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct devices_list *devices, *device;
 	bool found = false;
@@ -3637,7 +3695,7 @@ struct resources_list *new_resource_from_info(struct genl_info *info)
 	return r;
 }
 
-static int remember_resource(struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
+static int remember_resource(const struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
 {
 	struct resources_list ***tail = u_ptr;
 
@@ -3725,6 +3783,7 @@ struct devices_list *new_device_from_info(struct genl_info *info)
 {
 	struct drbd_cfg_context ctx = { .ctx_volume = -1U, .ctx_peer_node_id = -1U };
 	struct nlattr *disk_conf_nl = info->attrs[DRBD_NLA_DISK_CONF];
+	struct nlattr *device_conf_nl = info->attrs[DRBD_NLA_DEVICE_CONF];
 	struct devices_list *d = NULL;
 
 	drbd_cfg_context_from_attrs(&ctx, info);
@@ -3742,6 +3801,13 @@ struct devices_list *new_device_from_info(struct genl_info *info)
 		d->disk_conf_nl = malloc(size);
 		memcpy(d->disk_conf_nl, disk_conf_nl, size);
 	}
+	if (device_conf_nl) {
+		int size = nla_total_size(nla_len(device_conf_nl));
+
+		d->device_conf_nl = malloc(size);
+		memcpy(d->device_conf_nl, device_conf_nl, size);
+
+	}
 	disk_conf_from_attrs(&d->disk_conf, info);
 	d->info.dev_disk_state = D_DISKLESS;
 	d->info.is_intentional_diskless = IS_INTENTIONAL_DEF;
@@ -3753,7 +3819,7 @@ struct devices_list *new_device_from_info(struct genl_info *info)
 	return d;
 }
 
-static int remember_device(struct drbd_cmd *cm, struct genl_info *info, void *u_ptr)
+static int remember_device(const struct drbd_cmd *cm, struct genl_info *info, void *u_ptr)
 {
 	struct devices_list ***tail = u_ptr;
 
@@ -3840,7 +3906,7 @@ struct connections_list *new_connection_from_info(struct genl_info *info)
 	return c;
 }
 
-static int remember_connection(struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
+static int remember_connection(const struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
 {
 	struct connections_list ***tail = u_ptr;
 
@@ -3957,7 +4023,7 @@ struct peer_devices_list *new_peer_device_from_info(struct genl_info *info)
 	return p;
 
 }
-static int remember_peer_device(struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
+static int remember_peer_device(const struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
 {
 	struct peer_devices_list ***tail = u_ptr;
 
@@ -4031,7 +4097,7 @@ struct paths_list *new_path_from_info(struct genl_info *info)
 	return p;
 }
 
-static int remember_path(struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
+static int remember_path(const struct drbd_cmd *cmd, struct genl_info *info, void *u_ptr)
 {
 	struct paths_list ***tail = u_ptr;
 
@@ -4083,7 +4149,7 @@ void free_paths(struct paths_list *paths)
 	}
 }
 
-static int check_resize_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int check_resize_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct devices_list *devices, *device;
 	bool found = false;
@@ -4143,7 +4209,7 @@ static bool peer_device_ctx_match(struct drbd_cfg_context *a, struct drbd_cfg_co
 	&&	a->ctx_volume == b->ctx_volume;
 }
 
-static int show_or_get_gi_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int show_or_get_gi_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct peer_devices_list *peer_devices, *peer_device;
 	struct devices_list *devices = NULL, *device;
@@ -4202,7 +4268,7 @@ found:
 	goto out;
 }
 
-static int down_cmd(struct drbd_cmd *cm, int argc, char **argv)
+static int down_cmd(const struct drbd_cmd *cm, int argc, char **argv)
 {
 	struct resources_list *resources, *resource;
 	char *old_objname;
@@ -4270,7 +4336,7 @@ void peer_devices_append(struct peer_devices_list *peer_devices, struct genl_inf
 }
 
 /* Actually waits for all volumes of a connection... */
-static int wait_for_family(struct drbd_cmd *cm, struct genl_info *info, void *u_ptr)
+static int wait_for_family(const struct drbd_cmd *cm, struct genl_info *info, void *u_ptr)
 {
 	struct peer_devices_list *peer_devices = u_ptr;
 	struct drbd_cfg_context ctx = { .ctx_volume = -1U, .ctx_peer_node_id = -1U };
@@ -4385,7 +4451,7 @@ static bool power_of_two(int i)
 	return i && !(i & (i - 1));
 }
 
-static void print_command_usage(struct drbd_cmd *cm, enum usage_type ut)
+void print_command_usage(const struct drbd_cmd *cm, enum usage_type ut)
 {
 	struct drbd_argument *args;
 
@@ -4424,7 +4490,7 @@ static void print_command_usage(struct drbd_cmd *cm, enum usage_type ut)
 				/*
 				 * The "string" options here really are
 				 * timeouts, but we can't describe them
-				 * in a resonable way here.
+				 * in a reasonable way here.
 				 */
 				printf("\t<option name=\"%s\" type=\"%s\">\n"
 				       "\t</option>\n",
@@ -4527,7 +4593,7 @@ static void print_usage_and_exit(const char *addinfo)
 
 
 	for (i = 0; i < ARRAY_SIZE(commands); i++)
-		print_command_usage(&commands[i], BRIEF);
+		print_command_usage(commands[i], BRIEF);
 
 	printf("\nUse 'drbdsetup help command' for command-specific help.\n\n");
 	if (addinfo)  /* FIXME: ?! */
@@ -4557,7 +4623,11 @@ static void maybe_exec_legacy_drbdsetup(char **argv)
 
 int drbdsetup_main(int argc, char **argv)
 {
-	struct drbd_cmd *cmd;
+	struct genl_connect_options connect_options = {
+		.rcvbuf_size = 1024*1024,
+		.sndbuf_size =  128*1024,
+	};
+	const struct drbd_cmd *cmd;
 	struct option *options;
 	const char *opts;
 	int c, rv = 0;
@@ -4636,6 +4706,13 @@ int drbdsetup_main(int argc, char **argv)
 	argv++;
 	argc--;
 
+	/* Always? Or only for the "events2" subcommand? */
+	{
+		char *val = getenv("DRBD_GENL_RCVBUF_SZ");
+		if (val)
+			connect_options.rcvbuf_size = m_strtoll(val,1);
+	}
+
 	options = make_longoptions(cmd);
 	opts = make_optstring(options);
 	for (;;) {
@@ -4644,7 +4721,18 @@ int drbdsetup_main(int argc, char **argv)
 			break;
 		if (c == '?' || c == ':')
 			print_usage_and_exit(NULL);
+		/* Needs to be handled before genl_connect() */
+		if (c == OPT_GENL_RCVBUF_SZ) {
+			connect_options.rcvbuf_size = m_strtoll(optarg,1);
+			continue;
+		}
 	}
+	/* still clamp to "sensible" values */
+	if (connect_options.rcvbuf_size < 100*1024)
+		connect_options.rcvbuf_size = 100*1024;
+	if (connect_options.rcvbuf_size > 100*1024*1024)
+		connect_options.rcvbuf_size = 100*1024*1024;
+
 	/* All non-option arguments now are in argv[optind .. argc - 1]. */
 	first_optind = optind;
 
@@ -4653,7 +4741,7 @@ int drbdsetup_main(int argc, char **argv)
 		/* maybe more specific: (1 << GENL_ID_CTRL)? */
 		drbd_genl_family.nl_groups = -1;
 	}
-	drbd_sock = genl_connect_to_family(&drbd_genl_family);
+	drbd_sock = genl_connect_to_family(&drbd_genl_family, &connect_options);
 	if (!drbd_sock) {
 		fprintf(stderr, "Could not connect to 'drbd' generic netlink family\n");
 		return 20;
@@ -4736,6 +4824,18 @@ int drbdsetup_main(int argc, char **argv)
 			} else if (next_arg == CTX_VOLUME) {
 				global_ctx.ctx_volume = m_strtoll(argv[optind], 1);
 			} else if (next_arg == CTX_PEER_NODE_ID) {
+				enum new_strtoll_errs err;
+				unsigned long long r;
+				const char def_unit = 1;
+
+				err = new_strtoll(argv[optind], def_unit, &r);
+				if (err != MSE_OK) {
+					int e = drbd8_compat_connect_or_disconnect(argc, argv, cmd);
+					if (!e)
+						return 0;
+
+					print_strtoll_error_and_exit(err, argv[optind], def_unit);
+				}
 				global_ctx.ctx_peer_node_id = m_strtoll(argv[optind], 1);
 			} else
 				assert(0);

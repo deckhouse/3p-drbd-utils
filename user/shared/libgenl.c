@@ -36,11 +36,22 @@ int genl_join_mc_group(struct genl_sock *s, const char *name) {
 		}						\
 	} while(0)
 
-static struct genl_sock *genl_connect(__u32 nl_groups)
+static struct genl_sock *genl_connect(__u32 nl_groups, struct genl_connect_options *opts)
 {
+	struct genl_connect_options default_options = {
+		.rcvbuf_size = 1 << 20,
+		.sndbuf_size = 1 << 20,
+	};
 	struct genl_sock *s = calloc(1, sizeof(*s));
 	socklen_t sock_len;
-	int bsz = 1 << 20;
+	int bsz;
+
+	if (!opts)
+		opts = &default_options;
+	else {
+		if (!opts->rcvbuf_size) opts->rcvbuf_size = default_options.rcvbuf_size;
+		if (!opts->sndbuf_size) opts->sndbuf_size = default_options.sndbuf_size;
+	}
 
 	if (!s)
 		return NULL;
@@ -64,10 +75,33 @@ static struct genl_sock *genl_connect(__u32 nl_groups)
 		goto fail;
 
 	sock_len = sizeof(s->s_local);
-	DO_OR_LOG_AND_FAIL(setsockopt(s->s_fd, SOL_SOCKET, SO_SNDBUF, &bsz, sizeof(bsz)));
-	DO_OR_LOG_AND_FAIL(setsockopt(s->s_fd, SOL_SOCKET, SO_RCVBUF, &bsz, sizeof(bsz)));
+	DO_OR_LOG_AND_FAIL(setsockopt(s->s_fd, SOL_SOCKET, SO_SNDBUF, &opts->sndbuf_size, sizeof(&opts->sndbuf_size)));
+	DO_OR_LOG_AND_FAIL(setsockopt(s->s_fd, SOL_SOCKET, SO_RCVBUF, &opts->rcvbuf_size, sizeof(&opts->rcvbuf_size)));
 	DO_OR_LOG_AND_FAIL(bind(s->s_fd, (struct sockaddr*) &s->s_local, sizeof(s->s_local)));
 	DO_OR_LOG_AND_FAIL(getsockname(s->s_fd, (struct sockaddr*) &s->s_local, &sock_len));
+
+	/* Linux doubles the value set by setsockopt.
+	 * Compare half of what getsockopt reports back. */
+	sock_len = sizeof(bsz);
+	if (getsockopt(s->s_fd, SOL_SOCKET, SO_SNDBUF, &bsz, &sock_len) == 0
+	&&  (bsz/2) < opts->sndbuf_size)
+		dbg(1, "tried to set SO_SNDBUF %d, got %d; you may need to adjust sysctl net.core.wmem_max\n",
+			opts->sndbuf_size, (bsz/2));
+#ifdef SO_RCVBUFFORCE
+	sock_len = sizeof(bsz);
+	if (getsockopt(s->s_fd, SOL_SOCKET, SO_RCVBUF, &bsz, &sock_len) == 0) {
+		if ((bsz/2) < opts->rcvbuf_size) {
+			/* retry with FORCE */
+			setsockopt(s->s_fd, SOL_SOCKET, SO_RCVBUFFORCE, &opts->rcvbuf_size, sizeof(&opts->rcvbuf_size));
+		}
+	}
+#endif
+	sock_len = sizeof(bsz);
+	if (getsockopt(s->s_fd, SOL_SOCKET, SO_RCVBUF, &bsz, &sock_len) == 0
+	&&  (bsz/2) < opts->rcvbuf_size) {
+		dbg(1, "tried to set SO_RCVBUF %d, got %d; you may need to adjust sysctl net.core.rmem_max\n",
+			opts->rcvbuf_size, (bsz/2));
+	}
 
 	dbg(3, "bound socket to nl_pid:%u, my pid:%u, len:%u, sizeof:%u\n",
 		s->s_local.nl_pid, getpid(),
@@ -206,7 +240,11 @@ retry:
 int genl_recv_msgs(struct genl_sock *s, struct iovec *iov, char **err_desc, int timeout_ms)
 {
 	struct nlmsghdr *nlh;
-	int c = genl_recv_timeout(s, iov, timeout_ms);
+	int c;
+
+	if (err_desc)
+		*err_desc = NULL;
+	c = genl_recv_timeout(s, iov, timeout_ms);
 	if (c <= 0) {
 		if (err_desc)
 			*err_desc = (c == -E_RCV_TIMEDOUT)
@@ -271,7 +309,7 @@ static struct genl_family genl_ctrl = {
         .maxattr = CTRL_ATTR_MAX,
 };
 
-struct genl_sock *genl_connect_to_family(struct genl_family *family)
+struct genl_sock *genl_connect_to_family(struct genl_family *family, struct genl_connect_options *opts)
 {
 	struct genl_sock *s = NULL;
 	struct msg_buff *msg;
@@ -289,7 +327,7 @@ struct genl_sock *genl_connect_to_family(struct genl_family *family)
 		goto out;
 	}
 
-	s = genl_connect(family->nl_groups);
+	s = genl_connect(family->nl_groups, opts);
 	if (!s) {
 		dbg(1, "error creating netlink socket");
 		goto out;

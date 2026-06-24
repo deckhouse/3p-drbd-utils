@@ -665,6 +665,9 @@ const char *double_quote_string(const char *str)
 	char *b;
 	int len = 0;
 
+	if (!str)
+		return "\"\"";
+
 	for (s = str; *s; s++) {
 		if (*s == '\\' || *s == '"')
 			len++;
@@ -785,7 +788,7 @@ static bool key_serial_is_equal(const struct field_def *field, const char *a, co
 
 static const char *get_key_serial(struct context_def *ctx, const struct field_def *field, struct nlattr *nla)
 {
-	static char description[] = "\"\"";
+	static char description[] = "";
 
 	return description;
 }
@@ -892,6 +895,7 @@ struct field_class fc_key_serial = {
 #define KEY_SERIAL(f, key_type)					\
 	.nla_type = T_ ## f,					\
 	.ops = &fc_key_serial,					\
+	.needs_double_quoting = true,				\
 	.u = { .k = {						\
 		.type = key_type, } }				\
 
@@ -1268,6 +1272,7 @@ struct context_def peer_device_options_ctx = {
 		{ "c-max-rate", NUMERIC(c_max_rate, C_MAX_RATE), .unit = "bytes/second" },
 		{ "c-min-rate", NUMERIC(c_min_rate, C_MIN_RATE), .unit = "bytes/second" },
 		{ "bitmap", BOOLEAN(bitmap, BITMAP) },
+		{ "resync-without-replication", BOOLEAN(resync_without_replication, RESYNC_WITHOUT_REPLICATION) },
 		{ } },
 };
 

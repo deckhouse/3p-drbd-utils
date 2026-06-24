@@ -38,9 +38,11 @@
 #include <unistd.h>
 #include <assert.h>
 #include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include "drbdadm.h"
-#include "linux/drbd.h"
+#include "drbd_strings.h"
 #include "linux/drbd_limits.h"
 #include "drbdtool_common.h"
 #include "drbdadm_parser.h"
@@ -385,6 +387,18 @@ void pe_expected_got(const char *exp, int got)
 	exit(E_CONFIG_INVALID);
 }
 
+static int parse_drbd_state(struct state_names *names)
+{
+	int i;
+
+	EXP(TK_STRING);
+	for (i = 0; i < names->size; i++) {
+		if (strcmp(names->names[i], yylval.txt) == 0)
+			return i;
+	}
+	return -1;
+}
+
 static void parse_global(void)
 {
 	fline = line;
@@ -658,6 +672,32 @@ static void __parse_options(struct options *options,
 		token = yylex();
 		if (token == '}')
 			return;
+
+		if (token == TK__UNKNOWN) {
+			struct d_option *no;
+
+			token = yylex();
+
+			/* Our drbdsetup reported an option as unknown by the kernel.
+			 * If we don't know that option either,
+			 * how can drbdsetup know to report it as unknown?
+			 * That really should not happen.
+			 */
+			field_def = find_field(&no_prefix, options_def, yytext);
+			if (!field_def) {
+				char *s = yytext;
+				log_err("%s:%u: Parse error(ignored): '_unknown %.40s%s', but I don't know about it either.\n",
+				    config_file, line, s, strlen(s) > 40 ? "..." : "");
+				EXP(';');
+				continue;
+			}
+
+			no = new_opt((char*)field_def->name, NULL);
+			no->unknown = true;
+			insert_tail(options, no);
+			EXP(';');
+			continue;
+		}
 
 		field_def = find_field(&no_prefix, options_def, yytext);
 		if (!field_def) {
@@ -1660,8 +1700,8 @@ static struct connection *parse_connection(enum pr_flags flags)
 			peer_device->connection = conn;
 			STAILQ_INSERT_TAIL(&conn->peer_devices, peer_device, connection_link);
 			break;
-		case TK__IS_STANDALONE:
-			conn->is_standalone = 1;
+		case TK__CSTATE:
+			conn->cstate = parse_drbd_state(&drbd_conn_state_names);
 			EXP(';');
 			break;
 		case TK_PATH:
@@ -1877,7 +1917,7 @@ struct d_resource* parse_resource(char* res_name, enum pr_flags flags)
 }
 
 /* Returns the "previous" count, ie. 0 if this file wasn't seen before. */
-int was_file_already_seen(char *fn)
+int was_file_already_seen(const char *fn)
 {
 	ENTRY *e;
 	char *real_path;
@@ -2095,9 +2135,15 @@ static void validate_kmod(int token)
 
 void my_parse(void)
 {
+	struct stat sb;
+
 	/* Remember that we're reading that file. */
 	was_file_already_seen(config_file);
 
+	if (fstat(fileno(yyin), &sb) == 0 && (sb.st_mode & S_IFMT) == S_IFDIR) {
+		log_err("Cannot parse directory '%s' as config file.\n", config_file);
+		exit(20);
+	}
 
 	while (1) {
 		int token = yylex();

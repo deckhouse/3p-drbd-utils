@@ -180,8 +180,8 @@ struct utsname nodeinfo;
 int line = 1;
 int fline;
 
-char *config_file = NULL;
-char *config_save = NULL;
+const char *config_file = NULL;
+const char *config_save = NULL;
 char *config_test = NULL;
 struct d_resource *config = NULL;
 struct d_resource *common = NULL;
@@ -2337,6 +2337,8 @@ int ctx_by_name(struct cfg_ctx *ctx, const char *id)
 
 	ctx->res = NULL;
 	ctx->vol = NULL;
+	/* do not reset ctx->arg, though,
+	 * that does not change while iterating through several resource */
 
 	if (vol_id) {
 		*vol_id++ = '\0';
@@ -2919,7 +2921,7 @@ void sanity_check_cmd(char *cmd_name)
  * dopd cannot work.
  * NOTE: we assume that any gid != 0 will be the group dopd will run as,
  * typically haclient. */
-void sanity_check_conf(char *c)
+void sanity_check_conf(const char *c)
 {
 	struct stat sb;
 
@@ -3100,7 +3102,7 @@ static void global_validate_maybe_expand_die_if_invalid(int expand, enum pp_flag
  * aborts if any allocation or syscall fails.
  * return value should be free()d, once no longer needed.
  */
-char *canonify_path(char *path)
+char *canonify_path(const char *path)
 {
 	int cwd_fd = -1;
 	char *last_slash;
@@ -3245,6 +3247,7 @@ struct adm_cmd *find_cmd(char *cmdname);
 int parse_options(int argc, char **argv, struct adm_cmd **cmd, char ***resource_names)
 {
 	const char *optstring = make_optstring(admopt);
+	char *tmp;
 	int longindex, first_arg_index;
 	int i;
 
@@ -3290,7 +3293,7 @@ int parse_options(int argc, char **argv, struct adm_cmd **cmd, char ***resource_
 		case 'c':
 			if (!strcmp(optarg, "-")) {
 				yyin = stdin;
-				if (asprintf(&config_file, "STDIN") < 0) {
+				if (asprintf(&tmp, "STDIN") < 0) {
 					log_err("asprintf(config_file): %m\n");
 					return 20;
 				}
@@ -3298,14 +3301,15 @@ int parse_options(int argc, char **argv, struct adm_cmd **cmd, char ***resource_
 			} else {
 				yyin = fopen(optarg, "r");
 				if (!yyin) {
-					log_err("Can not open '%s'.\n.", optarg);
+					log_err("Can not open '%s'.\n", optarg);
 					exit(E_EXEC_ERROR);
 				}
-				if (asprintf(&config_file, "%s", optarg) < 0) {
+				if (asprintf(&tmp, "%s", optarg) < 0) {
 					log_err("asprintf(config_file): %m\n");
 					return 20;
 				}
 			}
+			config_file = tmp;
 			break;
 		case 't':
 			config_test = optarg;
@@ -3686,8 +3690,8 @@ int main(int argc, char **argv)
 	my_parse();
 
 	if (config_test) {
-		char *saved_config_file = config_file;
-		char *saved_config_save = config_save;
+		const char *saved_config_file = config_file;
+		const char *saved_config_save = config_save;
 
 		config_file = config_test;
 		config_save = canonify_path(config_test);
@@ -3695,7 +3699,7 @@ int main(int argc, char **argv)
 		fclose(yyin);
 		yyin = fopen(config_test, "r");
 		if (!yyin) {
-			log_err("Can not open '%s'.\n.", config_test);
+			log_err("Can not open '%s'.\n", config_test);
 			exit(E_EXEC_ERROR);
 		}
 		my_parse();

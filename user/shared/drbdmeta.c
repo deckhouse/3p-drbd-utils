@@ -5181,7 +5181,7 @@ static enum initialize_bitmap_mode check_ibm_arg(const char *arg)
 		if (0==strcmp(arg, initialize_bitmap_mode_names[i]))
 			return i;
 	}
-	fprintf(stderr, "invalid initialize-bitmap-mode \"%s\", should be one of", arg);
+	fprintf(stderr, "invalid initialize-bitmap mode \"%s\", should be one of", arg);
 	for (i = IBM_ZEROOUT; i <= IBM_SKIP; i++)
 		fprintf(stderr, "%c%s", sep[i != IBM_ZEROOUT], initialize_bitmap_mode_names[i]);
 	fprintf(stderr, "\n");
@@ -5482,8 +5482,7 @@ int main(int argc, char **argv)
 	if (minor_attached)
 		fprintf(stderr, "# Output might be stale, since minor %d is attached\n", cfg->minor);
 
-	// dummy bool normalization to not return negative values, the usual "FIXME sane exit codes" still applies */
-	return !!rv;
+	return rv;
 	/* and if we want an explicit free,
 	 * this would be the place for it.
 	 * free(cfg->md_device_name), free(cfg) ...
